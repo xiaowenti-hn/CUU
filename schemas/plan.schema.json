@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qa-platform.local/schemas/plan.schema.json",
+  "title": "验收方案",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ui", "cases", "checks", "open", "source"],
+  "properties": {
+    "ui": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seed_object_count"],
+      "properties": {
+        "seed_object_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "大于等于 0 的整数。布尔值和字符串都不合法。"
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "path", "title_text"],
+            "properties": {
+              "id": {"type": "string"},
+              "path": {"type": "string"},
+              "title_text": {"type": "string"},
+              "controls": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/control"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "check_id", "pk_columns", "steps"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "title": {"type": "string"},
+          "check_id": {"type": "string", "minLength": 1},
+          "pk_columns": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"$ref": "#/$defs/identifier"},
+            "description": "必须是对应 check.pk 的非空子集。"
+          },
+          "preconditions": {"type": "array", "items": {"type": "string"}},
+          "steps": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/step"}
+          }
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "table", "pk", "state_field", "source"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "kind": {"const": "table"},
+          "table": {"$ref": "#/$defs/identifier"},
+          "pk": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"$ref": "#/$defs/identifier"}
+          },
+          "state_field": {"$ref": "#/$defs/identifier"},
+          "source": {
+            "type": "string",
+            "pattern": "^.+:[0-9]+$",
+            "description": "path:line，路径必须出现在本次材料里。"
+          },
+          "database": {
+            "type": "string",
+            "description": "可选。不在该次运行允许的库名单里则方案作废。"
+          }
+        }
+      }
+    },
+    "open": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["decision"],
+        "properties": {
+          "id": {"type": "string"},
+          "topic": {"type": "string"},
+          "needs_decision": {"type": "boolean"},
+          "decision": {
+            "const": "",
+            "description": "模型必须留下空字符串。人的决定只在审批时写入。"
+          }
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "request_id", "requirement_id", "commits", "files"],
+      "properties": {
+        "model": {"type": "string"},
+        "request_id": {"type": "string"},
+        "requirement_id": {"type": "string"},
+        "commits": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "必须是本次搜索或 manual-commits 的子集。多出的 SHA 使整份方案作废。"
+        },
+        "files": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "control": {
+      "type": "object",
+      "required": ["role", "name", "locator_status"],
+      "properties": {
+        "role": {"$ref": "#/$defs/role"},
+        "name": {"type": "string"},
+        "locator_status": {"enum": ["ready", "pending"]}
+      }
+    },
+    "role": {
+      "enum": ["button", "link", "textbox", "checkbox", "radio", "combobox"]
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "name", "locator_status", "action", "phase"],
+      "properties": {
+        "role": {"$ref": "#/$defs/role"},
+        "name": {"type": "string"},
+        "locator_status": {"enum": ["ready", "pending"]},
+        "action": {"enum": ["click", "type", "select", "set"]},
+        "phase": {"enum": ["seed", "test"]},
+        "effect": {"enum": ["read", "commit"]},
+        "value": {"type": "string"},
+        "option": {"type": "string"},
+        "checked": {"type": "boolean"},
+        "expect_text": {"type": "array", "items": {"type": "string"}}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"action": {"const": "type"}},
+            "required": ["action"]
+          },
+          "then": {"required": ["value"]}
+        },
+        {
+          "if": {
+            "properties": {"action": {"const": "select"}},
+            "required": ["action"]
+          },
+          "then": {"required": ["option"]}
+        },
+        {
+          "if": {
+            "properties": {"action": {"const": "set"}},
+            "required": ["action"]
+          },
+          "then": {"required": ["checked"]}
+        },
+        {
+          "if": {
+            "properties": {"action": {"const": "click"}},
+            "required": ["action"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["value"]},
+                {"required": ["option"]},
+                {"required": ["checked"]}
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

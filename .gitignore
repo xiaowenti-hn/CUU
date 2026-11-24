@@ -1,0 +1,14 @@
+var/
+frontend/node_modules/
+frontend/dist/
+backend/.venv/
+backend/secrets.env
+backend/.python/
+backend/.tools/
+**/__pycache__/
+*.pyc
+*.tmp
+.DS_Store
+
+# Python package metadata
+backend/*.egg-info/
