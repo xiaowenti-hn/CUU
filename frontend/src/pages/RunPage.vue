@@ -65,6 +65,8 @@ const reportOpen = ref(false);
 const reportError = ref("");
 const reportLines = ref<Array<{ kind: "h" | "p" | "img"; text: string; src?: string }>>([]);
 const reportUrls: string[] = [];
+const requirementShots = ref<string[]>([]);
+const shotUrls: string[] = [];
 
 function pageToken(): string {
   return document.querySelector<HTMLMetaElement>('meta[name="qa-token"]')?.content ?? "";
@@ -74,6 +76,29 @@ function releaseReport(): void {
   for (const url of reportUrls) URL.revokeObjectURL(url);
   reportUrls.length = 0;
   reportLines.value = [];
+}
+
+function releaseShots(): void {
+  for (const url of shotUrls) URL.revokeObjectURL(url);
+  shotUrls.length = 0;
+  requirementShots.value = [];
+}
+
+async function loadRequirementShots() {
+  releaseShots();
+  const files = run.value?.requirement_images ?? [];
+  if (!files.length) return;
+  const headers = new Headers();
+  headers.set("X-QA-Token", pageToken());
+  const urls: string[] = [];
+  for (const relative of files) {
+    const shot = await fetch(`/api/runs/${runId.value}/artifacts/${relative}`, { headers });
+    if (!shot.ok) continue;
+    const src = URL.createObjectURL(await shot.blob());
+    shotUrls.push(src);
+    urls.push(src);
+  }
+  requirementShots.value = urls;
 }
 
 async function toggleReport() {
@@ -151,6 +176,9 @@ function eventBody(basis: string): string {
 
 watch(() => run.value?.events?.length ?? 0, () => {
   void revealLatest();
+});
+watch(() => (run.value?.requirement_images ?? []).join("|"), () => {
+  void loadRequirementShots();
 });
 const pipeline = computed(() => {
   const events = run.value?.events ?? [];
@@ -538,6 +566,7 @@ onUnmounted(() => {
   window.clearTimeout(timer);
   document.removeEventListener("visibilitychange", onVisibility);
   releaseReport();
+  releaseShots();
 });
 </script>
 
@@ -603,6 +632,11 @@ onUnmounted(() => {
           <p v-for="page in plan.ui?.pages ?? []" :key="page.id || page.path" class="hint">
             材料里的页面：{{ page.title_text || page.id || "未命名" }}，路径 {{ page.path || "还没有路径" }}。
           </p>
+          <div v-if="requirementShots.length" class="plan-shots">
+            <p class="hint">需求图</p>
+            <img v-for="(src, index) in requirementShots" :key="index" class="plan-shot" :src="src" alt="需求图" />
+          </div>
+          <p v-if="(plan.ui?.surfaces ?? []).length" class="hint">图上的页签：{{ (plan.ui?.surfaces ?? []).join("、") }}</p>
           <article v-for="item in plan.cases ?? []" :key="item.id" class="plan-block">
             <h2>{{ item.id }}<template v-if="item.title"> {{ item.title }}</template></h2>
             <dl class="req-facts">

@@ -459,6 +459,7 @@ def test_report_records_the_page_result_apart_from_the_inputs(tmp_path):
     seal_run(run)
     saved = load_case(run, "C1")
     assert saved["status"] == "passed"
+    assert render_report(run) == run / "report.md"
     text = (run / "report.md").read_text(encoding="utf-8")
     assert "准备：3 条：A-1、A-2、A-3" in text
     assert "写入：2 条：A-1、A-2" in text

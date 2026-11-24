@@ -61,6 +61,7 @@ export type PlanDocument = {
     seed_object_count?: number;
     step_source?: string;
     code_notes?: Array<{ check_id?: string; text?: string }>;
+    surfaces?: string[];
     pages?: Array<{
       id?: string;
       path?: string;
@@ -145,6 +146,7 @@ export type RunRecord = {
   current_seen: string;
   round_prompt: { rounds: number; question: string } | null;
   requirement: { id: string; title: string; source: string } | null;
+  requirement_images?: string[];
   review: ReviewRecord | null;
   approvals: ReviewRecord[];
 };

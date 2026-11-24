@@ -521,9 +521,14 @@ def test_propose_sends_the_requirement_screenshot(tmp_path):
     path = JAVA_PATH
     seen = []
 
+    pictured = valid_doc(sha, path)
+    pictured["ui"]["pages"] = [{"title_text": "退款页", "path": ""}]
+    pictured["ui"]["surfaces"] = []
+    pictured["cases"][0]["start"] = "退款页"
+
     def complete(key, payload):
         seen.append(payload)
-        return model_result(valid_doc(sha, path))
+        return model_result(pictured)
 
     run = tmp_path / "vision"
     run.mkdir()
@@ -677,6 +682,25 @@ def test_validate_plan_field_rules():
     assert validate_plan(counted, allowed_commits={sha}, material_files={path}) == []
     counted["cases"][0]["expect_text"] = ["共 1 条"]
     assert validate_plan(counted, allowed_commits={sha}, material_files={path}) == []
+
+    biased = valid_doc(sha, path)
+    biased["cases"][0]["expect_text"] = ["结果条数"]
+    biased["cases"][0]["goal"] = "列表只剩这些输入对应的行"
+    errors = validate_plan(biased, allowed_commits={sha}, material_files={path})
+    assert any("条数" in item and "只剩" in item for item in errors)
+
+    pictured = valid_doc(sha, path)
+    pictured["ui"]["pages"] = [{"title_text": "结算页", "path": ""}]
+    pictured["ui"]["surfaces"] = ["甲页签", "乙页签"]
+    pictured["cases"][0]["start"] = "甲页签"
+    pictured["cases"][0]["goal"] = "把准备的输入填进条件，做查询，读页面上的结果条数。"
+    pictured["cases"][0]["expect_text"] = ["结果条数"]
+    errors = validate_plan(pictured, allowed_commits={sha}, material_files={path}, has_images=True)
+    assert any("不要只写页签" in item for item in errors)
+    pictured["cases"][0]["start"] = "结算页 - 甲页签"
+    pictured["open"] = [{"id": "open-1", "question": "乙页签在材料里对不上表，要不要测？", "needs_decision": True, "decision": ""}]
+    assert validate_plan(pictured, allowed_commits={sha}, material_files={path}, has_images=True) == []
+    assert validate_plan(valid_doc(sha, path), allowed_commits={sha}, material_files={path}, has_images=False) == []
 
 
 def test_materials_keep_backend_hunks_and_frontend_text(tmp_path, monkeypatch):

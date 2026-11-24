@@ -31,6 +31,26 @@ def menu_rows_sql(table: str) -> str:
     )
 
 
+def menu_by_name(name: str, rows: list) -> dict | None:
+    """页面名和菜单名完全相同，并且只对应一条路径时才用。"""
+    wanted = (name or "").strip()
+    if not wanted:
+        return None
+    found: dict[str, dict] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("menu_name") or row.get("name") or "").strip()
+        route = str(row.get("route") or row.get("path") or "").strip()
+        component = str(row.get("component") or "").strip()
+        if label != wanted or not component or not valid_route(route):
+            continue
+        found.setdefault(route, {"name": label, "path": route, "component": component})
+    if len(found) != 1:
+        return None
+    return next(iter(found.values()))
+
+
 def choose_menu_page(text: str, rows: list) -> dict | None:
     """菜单名原样出现在需求正文里才采用。对上多条就不猜。"""
     body = text or ""
@@ -90,12 +110,18 @@ def load_menus(database: str) -> list[dict]:
 
 
 def pick_path(plan: dict, text: str, rows: list) -> tuple[str | None, str]:
-    """已有路径就用它。没有时按菜单选一条，不改方案文件。"""
+    """已有路径就用它。没有时用页面名对菜单，再不改方案文件。"""
     ui = plan.get("ui") if isinstance(plan.get("ui"), dict) else {}
     pages = ui.get("pages") if isinstance(ui.get("pages"), list) else []
     for page in pages:
         if isinstance(page, dict) and valid_route(str(page.get("path") or "")):
             return str(page["path"]), ""
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        chosen = menu_by_name(str(page.get("title_text") or ""), rows)
+        if chosen is not None:
+            return chosen["path"], f"方案没有页面路径，按菜单「{chosen['name']}」打开 {chosen['path']}"
     chosen = choose_menu_page(text, rows)
     if chosen is None:
         return None, ""
@@ -103,16 +129,30 @@ def pick_path(plan: dict, text: str, rows: list) -> tuple[str | None, str]:
 
 
 def attach_page(plan: dict, text: str, rows: list) -> dict | None:
-    """只在还没有路径时写入 ui.pages。返回补上的那一条。"""
+    """只在还没有路径时补上。页面名对得上唯一菜单就写入 path，不改页面名。"""
     ui = plan.get("ui")
     if not isinstance(ui, dict):
         ui = {}
         plan["ui"] = ui
     pages = ui.get("pages")
     if isinstance(pages, list):
-        for page in pages:
-            if isinstance(page, dict) and valid_route(str(page.get("path") or "")):
-                return None
+        if any(isinstance(page, dict) and valid_route(str(page.get("path") or "")) for page in pages):
+            return None
+        titled = [
+            page for page in pages
+            if isinstance(page, dict) and str(page.get("title_text") or "").strip()
+        ]
+        if titled:
+            filled = None
+            for page in titled:
+                chosen = menu_by_name(str(page.get("title_text") or ""), rows)
+                if chosen is None:
+                    continue
+                page["path"] = chosen["path"]
+                if not page.get("id"):
+                    page["id"] = "menu-page"
+                filled = chosen
+            return filled
     chosen = choose_menu_page(text, rows)
     if chosen is None:
         return None

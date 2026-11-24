@@ -78,6 +78,7 @@ def test_report_and_artifact_need_a_real_file(client, app, var_dir, tmp_path):
     (run / "state.json").write_text('{"id":"run-abc123abc123"}\n', encoding="utf-8")
     (run / "images").mkdir()
     (run / "images" / "shot.png").write_bytes(b"\x89PNG")
+    (run / "images" / "requirement-1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     outside = tmp_path / "secret.txt"
     outside.write_text("secret", encoding="utf-8")
     (run / "requirement.txt").symlink_to(outside)
@@ -89,6 +90,9 @@ def test_report_and_artifact_need_a_real_file(client, app, var_dir, tmp_path):
     assert state.status_code == 200
     image = client.get("/api/runs/run-abc123abc123/artifacts/images/shot.png", headers=headers)
     assert image.status_code == 200
+    listed = client.get("/api/runs/run-abc123abc123", headers=headers)
+    assert listed.status_code == 200
+    assert listed.json()["requirement_images"] == ["images/requirement-1.png"]
     assert client.get("/api/runs/run-abc123abc123/artifacts/requirement.txt", headers=headers).status_code == 404
     assert client.get("/api/runs/run-abc123abc123/artifacts/../state.json", headers=headers).status_code == 404
     link = var_dir / "runs" / "run-ffffffffffff"

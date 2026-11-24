@@ -20,7 +20,12 @@ SOURCE_LINE = re.compile(r"^(.+):([0-9]+)$")
 SYSTEM_PROMPT = """你是验收方案助手。只根据给出的需求正文、提交号和摘录材料返回一个 JSON 对象。
 顶层字段只能围绕 ui、cases、checks、open、source。
 ui.seed_object_count 是大于等于 0 的整数。
-如果给出了 menus，ui.pages 要有一条，path 原样抄 menus 里的 route，title_text 抄对应的 menu_name。不要编造路径。对不上就留空，不要猜。
+如果带了需求截图，ui.pages 写一条。title_text 是截图最外层正在打开的那一页的名字，不要写成里面的页签。path 先留空，不要编。
+ui.surfaces 是字符串数组，按截图顺序列出这一页上的页签。没有页签就写空数组。
+每条用例的 start：有页签时写成「外层页面 - 页签名」，没有页签时只写外层页面。不要只写页签。
+图上有的页签，材料里对得上表的各写一条用例，页签名要在 ui.surfaces 里。对不上表的页签不要编用例，在 open 里用这个页签名提问。图上没有的页签，不要因为代码里有控制器就加。
+没有截图时，ui.surfaces 写空数组。start 看不出页面就写空字符串，不要猜。
+如果给出了 menus，页面名能对上唯一一条 menu_name 时，path 原样抄它的 route。对不上或对上多条就留空，不要猜。
 cases 至少一条，id 在文件内唯一，不能把方案收成 count 和 notice。
 每条用例要有 check_id 和 pk_columns。pk_columns 是对应 check 的 pk 的非空子集。
 每个步骤都要有 role、name、locator_status、action、phase。
@@ -29,8 +34,8 @@ role 只能是 button、link、textbox、checkbox、radio、combobox。
 action 为 type 时要有字符串 value；为 select 时要有 option；为 set 时要有布尔 checked；为 click 时不能带 value、option、checked。
 effect 只能是 read 或 commit，不写则视为 read。phase 只能是 seed 或 test。
 每条用例还要有 goal、start、expect_text。这三样是交给操作页面的人看的说明，不是定位脚本。
-goal 是一句话，写清在页面上做成什么样算通过。
-start 是从哪个已经能看见的页面或页签开始。材料里有菜单名或页签名就写上；看不出来就写成空字符串，不要猜路径。
+goal 是一句话。查询类写成：把准备的输入填进截图箭头指的条件，做查询，读页面上的结果条数。不要写列表只剩这些输入，也不要写条数等于输入条数。
+start 见上面。没有截图、也看不出页面时写空字符串，不要猜路径。
 expect_text 是字符串数组。每一项是做完后页面上新出现的短文字。不要把这一步要点、要填、要选的控件名写进去。页签名如果就是要点的那个控件，也不要写进去。
 需求截图里的空表、箭头和数字只说明界面长什么样。空表上的 0 是示例数据，不是这次查询的结果。不要把「共 0 条」或「查询完成」写进 expect_text，除非需求正文里原样有这句。
 库里的行是测试输入，方案阶段还没取出，条数也还不知道。不要把输入条数写成期望。
@@ -138,8 +143,73 @@ def _example_expect(item: str, requirement: str) -> bool:
     return text in _EXAMPLE_WORDS or _EXAMPLE_RESULT.fullmatch(text) is not None
 
 
+_START_SPLIT = re.compile(r"\s*[-—－]\s*")
+_GOAL_BIAS = ("只剩", "仅剩", "条数等于", "等于输入", "和输入一样", "一样多")
+
+
+def _start_parts(start: str) -> list[str]:
+    return [part.strip("「」 ") for part in _START_SPLIT.split(start.strip()) if part.strip("「」 ")]
+
+
+def _page_title(ui) -> str:
+    pages = ui.get("pages") if isinstance(ui, dict) and isinstance(ui.get("pages"), list) else []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        title = str(page.get("title_text") or "").strip()
+        if title:
+            return title
+    return ""
+
+
+def _surface_errors(doc, ui, cases) -> list[str]:
+    """有需求截图时，起点先写外层页面，再写页签。页签和用例或待决定一一对应。"""
+    errors = []
+    title = _page_title(ui)
+    if not title:
+        errors.append("有需求截图时，ui.pages 要写一条，title_text 是截图最外层正在打开的页面，不要写成里面的页签。")
+    surfaces = ui.get("surfaces") if isinstance(ui, dict) else None
+    if not isinstance(surfaces, list) or any(not isinstance(item, str) or not item.strip() for item in surfaces):
+        errors.append("有需求截图时，ui.surfaces 要列出这一页上的页签。没有页签就写空数组。")
+        return errors
+    names = [item.strip() for item in surfaces]
+    if len(names) != len(set(names)):
+        errors.append("ui.surfaces 里的页签名不要重复。")
+    opens = [
+        str(item.get("question") or "")
+        for item in (doc.get("open") or [])
+        if isinstance(item, dict)
+    ]
+    open_text = "\n".join(opens)
+    used: list[str] = []
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        label = case.get("id") if isinstance(case.get("id"), str) and case.get("id") else "未命名"
+        start = case.get("start") if isinstance(case.get("start"), str) else ""
+        parts = _start_parts(start)
+        if names:
+            if len(parts) != 2 or (title and parts[0] != title) or parts[1] not in names:
+                shown = title or "外层页面"
+                errors.append(
+                    f"用例「{label}」的 start 要写成「{shown} - 页签名」。"
+                    "页签名必须在 ui.surfaces 里。不要只写页签。"
+                )
+            else:
+                used.append(parts[1])
+        elif parts != [title]:
+            errors.append(f"用例「{label}」的 start 只写外层页面「{title}」。截图上没有页签。")
+    if len(used) != len(set(used)):
+        errors.append("同一个页签不要写两条用例。")
+    for name in names:
+        if name in used or name in open_text:
+            continue
+        errors.append(f"页签「{name}」没有用例。材料里对不上表时，在 open 里用这个页签名提问，不要编用例。")
+    return errors
+
+
 def validate_plan(doc, *, allowed_commits=None, material_files=None,
-                  allowed_databases=None, requirement: str = "") -> list[str]:
+                  allowed_databases=None, requirement: str = "", has_images: bool = False) -> list[str]:
     errors: list[str] = []
     if not isinstance(doc, dict):
         return ["方案必须是 JSON 对象"]
@@ -164,6 +234,8 @@ def validate_plan(doc, *, allowed_commits=None, material_files=None,
     if not isinstance(cases, list) or not cases:
         errors.append("cases 至少一条")
         cases = []
+    if has_images:
+        errors.extend(_surface_errors(doc, ui if isinstance(ui, dict) else {}, cases))
     case_ids = [item.get("id") for item in cases if isinstance(item, dict)]
     if case_ids and set(case_ids) <= {"count", "notice"}:
         errors.append("演示方案不能只有 count 和 notice")
@@ -242,6 +314,11 @@ def validate_plan(doc, *, allowed_commits=None, material_files=None,
                 errors.append(
                     f"用例「{case_label}」的 expect_text 写成了示例结果：{'、'.join(examples)}。"
                     "空表上的 0 和「查询完成」不是查询结果。要看条数就写「结果条数」，执行时再从页面读取。"
+                )
+            if isinstance(goal, str) and "结果条数" in items and any(word in goal for word in _GOAL_BIAS):
+                errors.append(
+                    f"用例「{case_label}」的目标把结果写成了只剩输入或条数相等。"
+                    "查询结果是页面上的条数，可以和输入条数不同。"
                 )
         check = check_by_id.get(case.get("check_id"))
         if check is None:
@@ -440,6 +517,7 @@ def propose(run_dir, *, key: str, shas: list[str], files: list[str], materials: 
             material_files=set(files),
             allowed_databases=list(state.get("allowed_databases") or []),
             requirement=body,
+            has_images=bool(images),
         )
         errors.extend(criteria_gaps(doc, criteria))
         return doc, errors

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -101,6 +102,20 @@ def view_project(project: dict) -> dict:
     }).model_dump()
 
 
+def requirement_images(path: Path) -> list[str]:
+    """需求图。窗口截图和云效正文里的图片都算，别的截图不算。"""
+    folder = path / "images"
+    if folder.is_symlink() or not folder.is_dir():
+        return []
+    found = []
+    for child in sorted(folder.iterdir(), key=lambda item: item.name):
+        if child.is_symlink() or not child.is_file():
+            continue
+        if re.fullmatch(r"requirement(?:-\d+)?\.(?:png|jpg)", child.name):
+            found.append(f"images/{child.name}")
+    return found
+
+
 def view_run(path: Path, executor: ExecutorSlot) -> dict:
     state = read_state(path)
     requirement = state.get("requirement") if isinstance(state.get("requirement"), dict) else None
@@ -130,6 +145,7 @@ def view_run(path: Path, executor: ExecutorSlot) -> dict:
         "events": events if isinstance(events, list) else [],
         "requirement_source": source,
         "requirement": requirement_view,
+        "requirement_images": requirement_images(path),
         "review": state.get("review"),
         "approvals": state.get("approvals") or [],
         "cases": [
