@@ -173,9 +173,175 @@ def test_trade_id_field_is_not_the_reprocess_button():
         {"element_index": 7, "role": "AXColumn", "text": "交易号"},
     ]})}]}
     assert _match_index(column_only, "交易号", "textbox") is None
+    mixed = {"content": [{"type": "text", "text": json.dumps({"matches": [
+        {"element_index": 2, "role": "AXButton", "text": "无交易号"},
+        {"element_index": 5, "role": "AXButton", "text": "重转交易号"},
+        {"element_index": 8, "role": "AXButton", "text": "AI分析交易号"},
+        {"element_index": 12, "role": "AXTextField", "text": "交易号"},
+    ]})}]}
+    assert _match_index(mixed, "交易号", "") == "12"
+    buttons_only = {"content": [{"type": "text", "text": json.dumps({"matches": [
+        {"element_index": 2, "role": "AXButton", "text": "无交易号"},
+        {"element_index": 5, "role": "AXButton", "text": "重转交易号"},
+        {"element_index": 8, "role": "AXButton", "text": "AI分析交易号"},
+    ]})}]}
+    assert _match_index(buttons_only, "交易号", "") is None
     from qa_platform.runner.execute import _page_lines
     assert "列表字段" in _page_lines(column_only, "交易号")
     assert "不是查询框" in _page_lines(column_only, "交易号")
+    tab = {"content": [{"type": "text", "text": json.dumps({"matches": [
+        {"element_index": 4, "role": "AXStaticText", "text": "丙页"},
+        {"element_index": 9, "role": "AXRadioButton", "text": "丙页"},
+    ]})}]}
+    assert _match_index(tab, "丙页", "") == "9"
+
+
+def test_static_text_is_clicked_at_its_position(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    case = {
+        "id": "C1",
+        "title": "切页",
+        "goal": "打开丙页。",
+        "check_id": "K1",
+        "status": "running",
+        "steps": [{"phase": "test", "action": "click", "role": "button", "name": "丙页"}],
+    }
+    clicks = []
+    turns = [
+        {"think": "点这一项", "action": "click", "text": "丙页"},
+        {"think": "结束", "action": "done"},
+    ]
+
+    class Hand:
+        def get_app_state(self, app, include_screenshot=False):
+            return {"text": f"URL: {BASE}/refund"}
+
+        def query(self, app, text, role=""):
+            matches = [{
+                "element_index": 4,
+                "role": "AXStaticText",
+                "text": text,
+                "bounds": {"x": 10, "y": 20, "w": 80, "h": 30},
+            }]
+            return {"content": [{"type": "text", "text": json.dumps({"matches": matches})}]}
+
+        def click(self, app, index, method="", x=None, y=None):
+            clicks.append((index, method, x, y))
+
+        def set_value(self, app, index, value):
+            raise AssertionError("typed")
+
+    assert _think_and_act(
+        run, state, case, {"checks": []}, Hand(), lambda _prompt: turns.pop(0),
+        "test", "Microsoft Edge", "",
+    ) == 0
+    assert clicks == [("4", "app_post", 50.0, 35.0)]
+    events = json.loads((run / "state.json").read_text(encoding="utf-8"))["events"]
+    assert any("点的是文字" in item["basis"] for item in events)
+
+
+def test_click_uses_the_named_control_not_its_text(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    case = {
+        "id": "C1",
+        "title": "切页",
+        "goal": "打开丙页。",
+        "check_id": "K1",
+        "status": "running",
+        "steps": [{"phase": "test", "action": "click", "role": "button", "name": "丙页"}],
+    }
+    clicks = []
+
+    class Hand:
+        def get_app_state(self, app, include_screenshot=False):
+            return {"text": f"URL: {BASE}/refund"}
+
+        def query(self, app, text, role=""):
+            matches = [
+                {"element_index": 4, "role": "AXStaticText", "text": text, "bounds": {"x": 10, "y": 20, "w": 80, "h": 30}},
+                {"element_index": 9, "role": "AXRadioButton", "text": text},
+            ]
+            return {"content": [{"type": "text", "text": json.dumps({"matches": matches})}]}
+
+        def click(self, app, index, method="", x=None, y=None):
+            clicks.append((index, method))
+
+        def set_value(self, app, index, value):
+            raise AssertionError("typed")
+
+    assert _think_and_act(
+        run, state, case, {"checks": []}, Hand(),
+        lambda _prompt: {"think": "点页签", "action": "click", "text": "丙页"} if not clicks else {"think": "结束", "action": "done"},
+        "test", "Microsoft Edge", "",
+    ) == 0
+    assert clicks == [("9", "")]
+    events = json.loads((run / "state.json").read_text(encoding="utf-8"))["events"]
+    assert not any("点的是文字" in item["basis"] for item in events)
+
+
+def test_tree_button_is_clicked_when_query_only_sees_its_text():
+    from qa_platform.runner.execute import _tree_control
+
+    tree = "\n".join([
+        "\t\t80 button 甲页 Frame: x=154, y=296, w=141, h=40",
+        "\t\t82 button 丙页 Frame: x=154, y=376, w=141, h=40",
+        "\t\t151 按钮 重转丙页",
+        "\t\t232 弹出式按钮 搜索标签页",
+        "\t\t4 AXStaticText 丙页",
+    ])
+    assert _tree_control(tree, "丙页") == "82"
+    assert _tree_control(tree, "重转丙页") is None
+    assert _tree_control(tree, "搜索") is None
+
+
+def test_click_hits_the_button_that_contains_the_text(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    case = {
+        "id": "C1",
+        "title": "切页",
+        "goal": "打开丙页。",
+        "check_id": "K1",
+        "status": "running",
+        "steps": [{"phase": "test", "action": "click", "role": "button", "name": "丙页"}],
+    }
+    clicks = []
+
+    class Hand:
+        def get_app_state(self, app, include_screenshot=False):
+            return {"text": f"82 button 丙页 Frame: x=154, y=376, w=141, h=40\nURL: {BASE}/refund"}
+
+        def query(self, app, text, role=""):
+            matches = [{
+                "element_index": 1000165,
+                "role": "AXStaticText",
+                "text": text,
+                "bounds": {"x": 158, "y": 388, "w": 70, "h": 16},
+            }]
+            return {"content": [{"type": "text", "text": json.dumps({"matches": matches})}]}
+
+        def click(self, app, index, method="", x=None, y=None):
+            clicks.append((str(index), method))
+
+        def set_value(self, app, index, value):
+            raise AssertionError("typed")
+
+    assert _think_and_act(
+        run, state, case, {"checks": []}, Hand(),
+        lambda _prompt: {"think": "点页签", "action": "click", "text": "丙页"} if not clicks else {"think": "结束", "action": "done"},
+        "test", "Microsoft Edge", "",
+    ) == 0
+    assert clicks == [("82", "")]
+    events = json.loads((run / "state.json").read_text(encoding="utf-8"))["events"]
+    assert not any("点的是文字" in item["basis"] for item in events)
 
 
 def test_drive_plan_follows_each_step_on_the_page():
@@ -299,7 +465,8 @@ def test_agent_reads_code_then_follows_the_plan(tmp_path):
     }
     plan = {"checks": [{"id": "K1", "source": "Bill.java:1"}]}
     turns = [
-        {"think": "先看账单代码里的交易号字段", "read": "Bill.java"},
+        {"think": "先看账单代码里的交易号字段", "action": "read"},
+        {"think": "带上路径再读", "action": "read", "text": "Bill.java"},
         {"think": "页面上先找交易号输入框", "action": "look", "text": "交易号", "role": "textbox"},
         {"think": "把库里的单号填进去", "action": "type", "text": "交易号", "role": "textbox"},
         {"think": "按方案点搜索", "action": "click", "text": "搜索", "role": "button"},
@@ -320,6 +487,7 @@ def test_agent_reads_code_then_follows_the_plan(tmp_path):
 
     assert _think_and_act(run, state, case, plan, Hand(), lambda _prompt: turns.pop(0), "test", "Microsoft Edge", "166996404164") == 0
     events = json.loads((run / "state.json").read_text(encoding="utf-8"))["events"]
+    assert any("读代码要带上相对路径" in item["basis"] for item in events)
     assert any("Bill.java" in item["basis"] or "交易号字段" in item["basis"] for item in events)
     assert any("已点击「搜索」" in item["basis"] for item in events)
 
@@ -348,6 +516,9 @@ def test_mismatch_goes_back_to_the_model(tmp_path):
     seen = []
 
     class Hand(Page):
+        def get_app_state(self, app, include_screenshot=False):
+            return {"text": f"URL: {BASE}/refund"}
+
         def click(self, app, index):
             clicks.append(index)
 
@@ -545,7 +716,15 @@ def test_plan_brief_reads_as_a_task():
     assert "选择「状态」为「已审核」（下拉）" in text
     assert "点击「搜索」（按钮）" in text
     assert "做完后页面上应出现：" in text
-    assert "不要点重转" in text
+    assert "做法只是参考" in text
+    from qa_platform.runner.execute import _agent_prompt
+    prompt = _agent_prompt(text, "", "当前页面", [], "当前目标：按订单号查询")
+    assert "不要点重转" in prompt
+    assert "再看一次页面" in prompt
+    assert "就是结果" not in prompt
+    assert '"text":"控件名"' in prompt
+    assert '"value":"要填的内容"' in prompt
+    assert '{"read":"相对路径"}' in prompt
 
     example = _plan_brief(
         {
@@ -566,7 +745,6 @@ def test_plan_brief_reads_as_a_task():
     assert "是示例" in example
     assert "测试输入" in example
     assert "A-1" in example and "A-2" in example
-    assert "对不上就重新看当前页面" in text
     assert "SO-1" in text
     assert "type textbox" not in text
 
@@ -624,6 +802,9 @@ def test_select_picks_the_option(tmp_path):
     clicks = []
 
     class Hand:
+        def get_app_state(self, app, include_screenshot=False):
+            return {"text": f"URL: {BASE}/refund"}
+
         def query(self, app, text, role=""):
             if "已审核" in text:
                 matches = [{"element_index": 8, "role": "AXMenuItem", "text": "已审核"}]
@@ -820,6 +1001,108 @@ def test_done_accepts_the_page_count_when_expect_is_the_example_zero(tmp_path):
     report = (run / "report.md").read_text(encoding="utf-8")
     assert "页面结果：共 505 条" in report
     assert "写入：2 条：A-1、A-2" in report
+
+
+def test_count_is_read_only_when_the_case_expects_it(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+
+    def run_case(root, expect):
+        run = build(root)
+        state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+        case = {
+            "id": "C1",
+            "title": "查一下",
+            "check_id": "K1",
+            "status": "running",
+            "expect_text": expect,
+            "steps": [{"phase": "test", "action": "click", "role": "button", "name": "搜索"}],
+        }
+        asked = []
+        prompts = []
+
+        class Hand:
+            def get_app_state(self, app, include_screenshot=False):
+                return {"text": f"URL: {BASE}/refund\n46 button 业务流水"}
+
+            def query(self, app, text, role=""):
+                asked.append(text)
+                if text == "共":
+                    matches = [{"element_index": 2, "role": "AXStaticText", "text": "共 505 条"}]
+                elif text == "搜索":
+                    matches = [
+                        {"element_index": 9, "role": "AXPopUpButton", "text": "搜索标签页"},
+                        {"element_index": 10, "role": "AXTextField", "text": "地址和搜索栏"},
+                        {"element_index": 11, "role": "AXStaticText", "text": "搜索条件"},
+                        {"element_index": 5, "role": "AXButton", "text": "搜索"},
+                    ]
+                else:
+                    matches = []
+                return {"content": [{"type": "text", "text": json.dumps({"matches": matches})}]}
+
+            def click(self, app, index):
+                assert index == "5"
+
+        def model(prompt):
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                return {"think": "点搜索", "action": "click", "text": "搜索"}
+            return {"think": "结束", "done": True}
+
+        assert _think_and_act(run, state, case, {"checks": []}, Hand(), model, "test", "Microsoft Edge", "") == 0
+        return prompts, asked
+
+    counted, asked = run_case(tmp_path / "count", ["结果条数"])
+    assert "页面结果：共 505 条" in counted[1]
+    assert "搜索标签页" not in counted[1]
+    assert "地址和搜索栏" not in counted[1]
+    assert "共" in asked
+
+    plain, asked = run_case(tmp_path / "plain", [])
+    assert all("页面结果" not in prompt and "就是结果" not in prompt for prompt in plain)
+    assert "共" not in asked
+
+
+def test_action_done_finishes_the_case(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    case = {
+        "id": "C1",
+        "title": "查一下",
+        "check_id": "K1",
+        "status": "running",
+        "expect_text": ["结果条数"],
+        "steps": [{"phase": "test", "action": "click", "role": "button", "name": "搜索"}],
+    }
+    prompts = []
+
+    class Hand:
+        def get_app_state(self, app, include_screenshot=False):
+            return {"text": f"URL: {BASE}/refund"}
+
+        def query(self, app, text, role=""):
+            if text == "共":
+                matches = [{"element_index": 2, "role": "AXStaticText", "text": "共 505 条"}]
+            else:
+                matches = [{"element_index": 5, "role": "AXButton", "text": text}]
+            return {"content": [{"type": "text", "text": json.dumps({"matches": matches})}]}
+
+        def click(self, app, index):
+            return {}
+
+    def model(prompt):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return {"think": "点搜索", "action": "click", "text": "搜索"}
+        return {"think": "结果已经出来", "action": "done"}
+
+    assert _think_and_act(run, state, case, {"checks": []}, Hand(), model, "test", "Microsoft Edge", "") == 0
+    assert all("没有可执行的动作" not in prompt for prompt in prompts)
+    saved = json.loads((run / "cases" / "C1" / "case.json").read_text(encoding="utf-8"))
+    assert saved["observation"] == "final"
+    events = json.loads((run / "state.json").read_text(encoding="utf-8"))["events"]
+    assert not any("没有可执行的动作" in item["basis"] for item in events)
 
 
 def test_value_still_in_the_field_does_not_finish(tmp_path):
@@ -1069,6 +1352,9 @@ def test_twenty_rounds_ask_on_the_console(tmp_path):
     asked = []
 
     class Hand:
+        def get_app_state(self, app, include_screenshot=False):
+            return {"text": f"URL: {BASE}/refund"}
+
         def query(self, app, text, role=""):
             body = json.dumps({"matches": [{"element_index": 1, "role": "AXStaticText", "text": text}]})
             return {"content": [{"type": "text", "text": body}]}
@@ -1192,7 +1478,7 @@ def test_reuse_model_chooses_control_and_keeps_screenshots(tmp_path):
         browser=lambda *args: browsers.append(args),
         query=lambda *args: [],
     ) == 0
-    assert browsers == [("Microsoft Edge", BASE + "/refund")]
+    assert browsers == []
     assert "Microsoft Edge" in prompts[0]
     assert "已经在这个浏览器里打开" in prompts[0]
     assert "待定位不是拒绝点击的理由" in prompts[0]
@@ -1291,7 +1577,7 @@ def test_commit_pending_is_saved_before_js_and_resume_skips_it(tmp_path):
     assert "数据库只能查询，未提交" in state["events"][-1]["basis"]
 
 
-def test_hidden_deployed_page_is_skipped_before_the_model(tmp_path):
+def test_hidden_deployed_page_skips_after_the_model_sees_the_page(tmp_path):
     from qa_platform.runner.execute import _think_and_act
 
     run = build(tmp_path)
@@ -1307,6 +1593,7 @@ def test_hidden_deployed_page_is_skipped_before_the_model(tmp_path):
             {"phase": "test", "action": "click", "role": "button", "name": "搜索"},
         ],
     }
+    prompts = []
 
     class Hand:
         def query(self, app, text, role=""):
@@ -1323,16 +1610,371 @@ def test_hidden_deployed_page_is_skipped_before_the_model(tmp_path):
         def set_value(self, app, index, value):
             raise AssertionError("typed")
 
-    def model(_prompt):
-        raise AssertionError("model")
+    def model(prompt):
+        prompts.append(prompt)
+        return {"think": "这一页没有亚马逊账单", "action": "skip", "text": "当前部署的界面没有这一项"}
 
     assert _think_and_act(run, state, case, {"checks": []}, Hand(), model, "test", "Microsoft Edge", "") == 0
+    assert prompts
+    assert "当前能填" in prompts[0]
+    assert "走到起点" not in prompts[0]
     saved = json.loads((run / "cases" / "case-amazon" / "case.json").read_text(encoding="utf-8"))
     assert saved["status"] == "skipped"
     assert saved["observation"] is None
     assert saved["result_reason"] == "当前部署的界面没有「亚马逊账单」，已跳过"
     events = json.loads((run / "state.json").read_text(encoding="utf-8"))["events"]
     assert any("已跳过" in item["basis"] for item in events)
+
+
+def test_type_puts_prepared_ids_into_the_fill_field(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    case = {
+        "id": "C1",
+        "title": "查交易号",
+        "check_id": "K1",
+        "status": "running",
+        "steps": [{"phase": "test", "action": "type", "role": "textbox", "name": "交易号"}],
+    }
+    asked = []
+    values = []
+    ids = "0,166996404164,2701767867084076860"
+
+    class Hand:
+        def query(self, app, text, role=""):
+            asked.append(text)
+            if text == "交易号":
+                matches = [{"element_index": 12, "role": "AXTextField", "text": "交易号"}]
+            else:
+                matches = []
+            return {"content": [{"type": "text", "text": json.dumps({"matches": matches})}]}
+
+        def click(self, app, index):
+            assert index == "12"
+
+        def set_value(self, app, index, value):
+            values.append(value)
+
+    turns = [
+        {"think": "把准备的单号填进去", "action": "type", "text": ids, "value": ""},
+        {"think": "填好了", "done": True},
+    ]
+    assert _think_and_act(
+        run, state, case, {"checks": []}, Hand(), lambda _prompt: turns.pop(0),
+        "test", "Microsoft Edge", "KEEP",
+    ) == 0
+    assert values == [ids]
+    assert "交易号" in asked
+    assert ids not in asked
+
+
+def test_type_payload_without_a_field_does_not_echo_the_ids(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    case = {
+        "id": "C1",
+        "title": "查交易号",
+        "check_id": "K1",
+        "status": "running",
+        "steps": [
+            {"phase": "test", "action": "type", "role": "textbox", "name": "交易号"},
+            {"phase": "test", "action": "click", "role": "button", "name": "搜索"},
+        ],
+    }
+    ids = ",".join(str(166996404164 + index) for index in range(20))
+    prompts = []
+
+    class Hand:
+        def get_app_state(self, app, include_screenshot=False):
+            return {"text": f"URL: {BASE}/refund"}
+
+        def query(self, app, text, role=""):
+            if text == "搜索":
+                matches = [{"element_index": 9, "role": "AXButton", "text": "搜索"}]
+            else:
+                matches = []
+            return {"content": [{"type": "text", "text": json.dumps({"matches": matches})}]}
+
+        def click(self, app, index):
+            return {}
+
+        def set_value(self, app, index, value):
+            raise AssertionError("typed")
+
+    def model(prompt):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return {"think": "点搜索", "action": "click", "text": "搜索"}
+        if len(prompts) == 2:
+            return {"think": "填这些单号", "action": "type", "text": ids}
+        return {"think": "结束", "done": True}
+
+    assert _think_and_act(run, state, case, {"checks": []}, Hand(), model, "test", "Microsoft Edge", "KEEP") == 0
+    assert "text 写控件名，value 写要填的内容" in prompts[2]
+    assert ids not in prompts[2]
+    events = json.loads((run / "state.json").read_text(encoding="utf-8"))["events"]
+    assert not any(ids in item["basis"] for item in events)
+
+
+def test_click_on_a_fill_name_focuses_the_entry(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    case = {
+        "id": "C1",
+        "title": "查交易号",
+        "check_id": "K1",
+        "status": "running",
+        "steps": [{"phase": "test", "action": "type", "role": "textbox", "name": "交易号"}],
+    }
+    clicks = []
+
+    class Hand:
+        def query(self, app, text, role=""):
+            if role == "textfield" and text == "交易号":
+                matches = [{"element_index": 12, "role": "AXTextField", "text": "交易号"}]
+            elif text == "交易号":
+                matches = [
+                    {"element_index": 2, "role": "AXButton", "text": "无交易号"},
+                    {"element_index": 5, "role": "AXButton", "text": "重转交易号"},
+                    {"element_index": 8, "role": "AXButton", "text": "AI分析交易号"},
+                ]
+            else:
+                matches = []
+            return {"content": [{"type": "text", "text": json.dumps({"matches": matches})}]}
+
+        def click(self, app, index):
+            clicks.append(index)
+
+        def set_value(self, app, index, value):
+            raise AssertionError("typed")
+
+    turns = [
+        {"think": "先点交易号", "action": "click", "text": "交易号"},
+        {"think": "结束", "done": True},
+    ]
+    assert _think_and_act(
+        run, state, case, {"checks": []}, Hand(), lambda _prompt: turns.pop(0),
+        "test", "Microsoft Edge", "166996404164",
+    ) == 0
+    assert clicks == ["12"]
+
+
+def test_skip_before_the_product_page_is_not_a_missing_tab(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    case = {
+        "id": "C1",
+        "title": "支付宝账单",
+        "goal": "在支付宝账单页按交易号查询。",
+        "check_id": "K1",
+        "status": "running",
+        "steps": [{"phase": "test", "action": "type", "role": "textbox", "name": "交易号"}],
+    }
+
+    class Hand:
+        def query(self, app, text, role=""):
+            return {"content": [{"type": "text", "text": json.dumps({"matches": []})}]}
+
+        def click(self, app, index):
+            raise AssertionError("clicked")
+
+        def set_value(self, app, index, value):
+            raise AssertionError("typed")
+
+    assert _think_and_act(
+        run, state, case, {"checks": []}, Hand(),
+        lambda _prompt: {"think": "没有这一项", "action": "skip", "text": "当前部署的界面没有这一项"},
+        "test", "Microsoft Edge", "",
+    ) == 2
+    saved = json.loads((run / "cases" / "C1" / "case.json").read_text(encoding="utf-8"))
+    assert saved["status"] == "blocked"
+    assert saved["result_reason"] == "测试页没有打开"
+    assert "当前部署的界面没有" not in saved["result_reason"]
+    events = json.loads((run / "state.json").read_text(encoding="utf-8"))["events"]
+    assert any("先打开产品页" in item["basis"] for item in events)
+
+
+def test_show_test_page_does_not_open_another_tab(tmp_path):
+    from qa_platform.runner.execute import show_test_page
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    opened = []
+
+    class Hand:
+        def list_apps(self):
+            return "Microsoft Edge — com.microsoft.edgemac [running]"
+
+        def get_app_state(self, app):
+            return {"content": [{"type": "text", "text": f"URL: {BASE}/refund"}]}
+
+    app, error = show_test_page(
+        run,
+        json.loads((run / "plan.json").read_text(encoding="utf-8")),
+        state,
+        Hand(),
+        None,
+        lambda _app, url: opened.append(url),
+        BASE,
+    )
+    assert app == "Microsoft Edge"
+    assert error == ""
+    assert opened == []
+    events = json.loads((run / "state.json").read_text(encoding="utf-8"))["events"]
+    assert any("不再另开标签" in item["basis"] for item in events)
+
+
+def test_browser_tab_is_not_clicked(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    case = {
+        "id": "C1",
+        "title": "查交易号",
+        "goal": "在支付宝账单页按交易号查询。",
+        "check_id": "K1",
+        "status": "running",
+        "steps": [{"phase": "test", "action": "type", "role": "textbox", "name": "交易号"}],
+    }
+    clicks = []
+    values = []
+    turns = [
+        {"think": "切到业财标签", "action": "click", "text": "业财uat环境 - 内存使用率 - 198 MB"},
+        {"think": "填交易号", "action": "type", "text": "交易号", "value": "SO-1"},
+        {"think": "结束", "done": True},
+    ]
+
+    class Hand:
+        def get_app_state(self, app, include_screenshot=False):
+            return {"text": f"URL: {BASE}/refund"}
+
+        def query(self, app, text, role=""):
+            if text == "SO-1":
+                matches = [{"element_index": 8, "role": "AXStaticText", "text": "SO-1"}]
+            elif "内存使用率" in text:
+                matches = [{"element_index": 1, "role": "AXRadioButton", "text": text}]
+            else:
+                matches = [{"element_index": 12, "role": "AXTextField", "text": text}]
+            return {"content": [{"type": "text", "text": json.dumps({"matches": matches})}]}
+
+        def click(self, app, index):
+            clicks.append(index)
+
+        def set_value(self, app, index, value):
+            values.append(value)
+
+    assert _think_and_act(
+        run, state, case, {"checks": []}, Hand(), lambda _prompt: turns.pop(0),
+        "test", "Microsoft Edge", "SO-1",
+    ) == 0
+    assert "1" not in clicks
+    assert values == ["SO-1"]
+    events = json.loads((run / "state.json").read_text(encoding="utf-8"))["events"]
+    assert any("不要点浏览器标签页" in item["basis"] for item in events)
+
+
+def test_login_page_skip_is_not_a_missing_tab(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    case = {
+        "id": "C2",
+        "title": "京东日账单",
+        "goal": "在京东日账单页按交易号查询。",
+        "check_id": "K1",
+        "status": "running",
+        "steps": [{"phase": "test", "action": "type", "role": "textbox", "name": "交易号"}],
+    }
+
+    class Hand:
+        def get_app_state(self, app, include_screenshot=False):
+            return {"text": f"URL: {BASE}/login"}
+
+        def query(self, app, text, role=""):
+            return {"content": [{"type": "text", "text": json.dumps({"matches": []})}]}
+
+        def click(self, app, index):
+            raise AssertionError("clicked")
+
+        def set_value(self, app, index, value):
+            raise AssertionError("typed")
+
+    assert _think_and_act(
+        run, state, case, {"checks": []}, Hand(),
+        lambda _prompt: {"think": "登录页", "action": "skip", "text": "当前部署的界面没有这一项"},
+        "test", "Microsoft Edge", "",
+    ) == 2
+    saved = json.loads((run / "cases" / "C2" / "case.json").read_text(encoding="utf-8"))
+    assert saved["status"] == "blocked"
+    assert saved["result_reason"] == "测试页没有打开"
+    assert "当前部署的界面没有" not in saved["result_reason"]
+    events = json.loads((run / "state.json").read_text(encoding="utf-8"))["events"]
+    assert any("先打开产品页" in item["basis"] for item in events)
+
+
+def test_case_tab_is_shown_on_the_live_page(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    case = {
+        "id": "C3",
+        "title": "京东钱包",
+        "goal": "在京东钱包页按交易号查询。",
+        "start": "电商结算单 - 京东钱包",
+        "check_id": "K1",
+        "status": "running",
+        "steps": [{"phase": "test", "action": "type", "role": "textbox", "name": "交易号"}],
+    }
+    prompts = []
+    values = []
+    turns = [
+        {"think": "先点页签", "action": "click", "text": "京东钱包"},
+        {"think": "填交易号", "action": "type", "text": "交易号", "value": "SO-1"},
+        {"think": "结束", "done": True},
+    ]
+
+    class Hand:
+        def get_app_state(self, app, include_screenshot=False):
+            return {"text": f"URL: {BASE}/refund"}
+
+        def query(self, app, text, role=""):
+            if text == "SO-1":
+                matches = [{"element_index": 8, "role": "AXStaticText", "text": "SO-1"}]
+            elif text == "京东钱包":
+                matches = [{"element_index": 7, "role": "AXRadioButton", "text": "京东钱包"}]
+            elif text == "交易号":
+                matches = [{"element_index": 12, "role": "AXTextField", "text": "交易号"}]
+            else:
+                matches = []
+            return {"content": [{"type": "text", "text": json.dumps({"matches": matches})}]}
+
+        def click(self, app, index):
+            return {}
+
+        def set_value(self, app, index, value):
+            values.append(value)
+
+    def model(prompt):
+        prompts.append(prompt)
+        return turns.pop(0)
+
+    assert _think_and_act(run, state, case, {"checks": []}, Hand(), model, "test", "Microsoft Edge", "SO-1") == 0
+    assert "当前页签" in prompts[0]
+    assert "京东钱包" in prompts[0]
+    assert "这一条要测页签「京东钱包」" in prompts[0]
+    assert "还没选中" in prompts[0]
+    assert values == ["SO-1"]
 
 
 def test_visible_page_is_not_skipped_and_the_address_bar_is_left_alone(tmp_path):
@@ -1512,21 +2154,19 @@ def test_goal_waits_for_the_start_and_reports_a_click_that_stays(tmp_path):
         if step == 2:
             return {"think": "再点一次", "action": "click", "text": "甲菜单"}
         if step == 3:
-            return {"think": "结束", "done": True}
-        if step == 4:
             ready["on"] = True
-            return {"think": "再看起点", "action": "look", "text": "乙页面"}
-        if step == 5:
+            return {"think": "再看这一页", "action": "look", "text": "乙页面"}
+        if step == 4:
             return {"think": "填值", "action": "type", "text": "条件", "value": "V-1"}
         return {"think": "结果里有了", "done": True}
 
     assert _think_and_act(run, state, case, {"checks": []}, Hand(), model, "test", "Microsoft Edge", "V-1") == 0
-    assert "当前目标：走到起点「甲菜单」、「乙页面」。" in prompts[0]
+    assert "当前目标：核对写入的值已经出现。" in prompts[0]
+    assert "走到起点" not in prompts[0]
+    assert "当前能填" in prompts[0]
     assert "不是这个控件" in prompts[0]
-    assert "参考做法要填" not in prompts[0]
     assert "窗口还在原处" in prompts[1]
     assert "这个动作已经做过，窗口没变" in prompts[2]
-    assert "还没有走到起点" in prompts[3]
     saved = json.loads((run / "cases" / "C1" / "case.json").read_text(encoding="utf-8"))
     assert saved["observation"] == "final"
 

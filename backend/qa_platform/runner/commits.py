@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 
 from qa_platform.runner.planner import propose, review_digest
-from qa_platform.runner.preflight import READ_GIT, record
+from qa_platform.runner.preflight import READ_GIT, note, record
 from qa_platform.store import read_state, timestamp, write_json
 
 ALLOWED_GIT = READ_GIT
@@ -311,9 +311,23 @@ def continue_plan(run_dir: Path, deepseek_key: str, *, complete=None) -> int:
         return _halt(run_dir, f"材料超过 100000 字符，已丢下文件：{listed}", "方案")
     from qa_platform.runner.baseline import code_table_catalog
     from qa_platform.runner.menu_page import load_menus
+    from qa_platform.runner.page_index import build_page_index, use_live_tables
 
     allowed = [item for item in state.get("allowed_databases") or [] if isinstance(item, str)]
-    catalog = code_table_catalog(allowed[0], text) if len(allowed) == 1 else []
+    pages = build_page_index(repo, str(state.get("front_repo_path") or ""))
+    extra = [str(row.get("table") or "") for row in pages if row.get("table")]
+    catalog = code_table_catalog(allowed[0], text, extra) if len(allowed) == 1 else []
+    pages = use_live_tables(pages, catalog)
+    if pages:
+        note(run_dir, step="方案", basis=f"页签索引对齐了 {len(pages)} 个页签")
+    shown = []
+    seen_tables = set()
+    for item in catalog:
+        table = item.get("table")
+        if table in seen_tables:
+            continue
+        seen_tables.add(table)
+        shown.append({key: value for key, value in item.items() if key != "annotation"})
     menus = load_menus(allowed[0]) if len(allowed) == 1 else []
     return propose(
         run_dir,
@@ -322,8 +336,9 @@ def continue_plan(run_dir: Path, deepseek_key: str, *, complete=None) -> int:
         files=files,
         materials=text,
         complete=complete,
-        live_tables=catalog,
+        live_tables=shown,
         menus=menus,
+        pages=pages,
     )
 
 

@@ -111,6 +111,13 @@ def check_project(project: dict) -> dict:
             errors.append({"code": "repo_path", "message": git_error})
             dirty = False
 
+    front = project.get("front_repo_path") or ""
+    if front:
+        folder = Path(front)
+        src = folder / "src"
+        if not folder.is_dir() or folder.is_symlink() or not src.is_dir() or src.is_symlink():
+            errors.append({"code": "front_repo_path", "message": "前端仓库要是含有 src 的目录"})
+
     if not branch_name:
         missing.append("branch")
     elif not branch_ok(branch_name):

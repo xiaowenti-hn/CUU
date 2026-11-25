@@ -703,6 +703,258 @@ def test_validate_plan_field_rules():
     assert validate_plan(valid_doc(sha, path), allowed_commits={sha}, material_files={path}, has_images=False) == []
 
 
+def _bound_page(source: str, table: str, tab: str = "有赞账单", route: str = "/bill/platformBill") -> dict:
+    return {
+        "tab": tab,
+        "route": route,
+        "mapping": "/bill/youZan",
+        "class_name": "YouZanBillController",
+        "table": table,
+        "source": source,
+        "filters": ["交易号"],
+    }
+
+
+def test_page_index_rejects_a_tab_bound_to_another_controller():
+    sha = "c" * 40
+    path = JAVA_PATH
+    youzan = "app/YouZanBillController.java:4"
+    page = _bound_page(youzan, "bfrs_you_zan_bill")
+    wrong = valid_doc(sha, path)
+    wrong["ui"]["pages"] = [{"title_text": "结算页", "path": ""}]
+    wrong["ui"]["surfaces"] = ["有赞账单", "小红书账单"]
+    wrong["cases"][0]["start"] = "结算页 - 有赞账单"
+    wrong["cases"][0]["goal"] = "把准备的输入填进条件，做查询，读页面上的结果条数。"
+    wrong["cases"][0]["expect_text"] = ["结果条数"]
+    wrong["checks"][0]["source"] = "app/ShopifyBillController.java:2"
+    wrong["checks"][0]["table"] = "shopify_bill"
+    wrong["open"] = [{
+        "id": "open-1",
+        "question": "小红书账单对不上索引，要不要测？",
+        "needs_decision": True,
+        "decision": "",
+    }]
+    errors = validate_plan(
+        wrong, allowed_commits={sha}, material_files={path}, has_images=True, page_index=[page],
+    )
+    assert any("YouZanBillController" in item and "ShopifyBillController.java" in item for item in errors)
+    assert any("bfrs_you_zan_bill" in item for item in errors)
+
+    wrong["checks"][0]["source"] = youzan
+    wrong["checks"][0]["table"] = "you_zan_bill"
+    assert validate_plan(
+        wrong, allowed_commits={sha}, material_files={path}, has_images=True, page_index=[page],
+    ) == []
+
+    parked = valid_doc(sha, path)
+    parked["ui"]["pages"] = [{"title_text": "结算页", "path": ""}]
+    parked["ui"]["surfaces"] = ["有赞账单"]
+    parked["cases"][0]["start"] = "结算页"
+    parked["open"] = [{
+        "id": "open-1",
+        "question": "有赞账单这次测不测？",
+        "needs_decision": True,
+        "decision": "",
+    }]
+    errors = validate_plan(
+        parked, allowed_commits={sha}, material_files={path}, has_images=True, page_index=[page],
+    )
+    assert any("要写成用例" in item and "有赞账单" in item for item in errors)
+
+
+def test_start_keeps_symbols_inside_the_page_and_the_tab():
+    sha = "c" * 40
+    path = JAVA_PATH
+    source = "app/RangeController.java:8"
+    tab = "范围-报告"
+    shorter = "报告"
+    missing = "还没有的页签"
+    page = _bound_page(source, "range_report", tab)
+    doc = valid_doc(sha, path)
+    doc["ui"]["pages"] = [{"title_text": "结算-页", "path": ""}]
+    doc["ui"]["surfaces"] = [tab, shorter, missing]
+    doc["cases"][0]["start"] = "「结算-页 - 范围-报告」"
+    doc["cases"][0]["goal"] = "把准备的输入填进条件，做查询，读页面上的结果条数。"
+    doc["cases"][0]["expect_text"] = ["结果条数"]
+    doc["checks"][0]["source"] = source
+    doc["checks"][0]["table"] = "range_report"
+    doc["open"] = [
+        {"id": "open-short", "question": "报告这次不单独测。", "needs_decision": True, "decision": ""},
+        {"id": "open-missing", "question": "还没有的页签对不上索引，要不要测？", "needs_decision": True, "decision": ""},
+    ]
+    assert validate_plan(
+        doc, allowed_commits={sha}, material_files={path}, has_images=True, page_index=[page],
+    ) == []
+
+    doc["cases"][0]["start"] = tab
+    errors = validate_plan(
+        doc, allowed_commits={sha}, material_files={path}, has_images=True, page_index=[page],
+    )
+    assert any("不要只写页签" in item for item in errors)
+    assert any("要写成用例" in item and tab in item for item in errors)
+
+
+def test_missing_pk_columns_and_locator_status_are_filled():
+    sha = "c" * 40
+    path = JAVA_PATH
+    doc = valid_doc(sha, path)
+    del doc["cases"][0]["pk_columns"]
+    del doc["cases"][0]["steps"][0]["locator_status"]
+    assert validate_plan(doc, allowed_commits={sha}, material_files={path}) == []
+    assert doc["cases"][0]["pk_columns"] == ["detail_id"]
+    assert doc["cases"][0]["steps"][0]["locator_status"] == "ready"
+
+    wrong = valid_doc(sha, path)
+    wrong["cases"][0]["pk_columns"] = ["other_id"]
+    errors = validate_plan(wrong, allowed_commits={sha}, material_files={path})
+    assert any("pk_columns" in item for item in errors)
+    assert wrong["cases"][0]["pk_columns"] == ["other_id"]
+
+    nameless = valid_doc(sha, path)
+    del nameless["cases"][0]["steps"][0]["name"]
+    del nameless["cases"][0]["steps"][0]["locator_status"]
+    errors = validate_plan(nameless, allowed_commits={sha}, material_files={path})
+    assert any("缺少 name" in item for item in errors)
+    assert nameless["cases"][0]["steps"][0].get("locator_status") in (None, "")
+
+
+def test_missing_check_kind_is_filled_with_table():
+    sha = "c" * 40
+    path = JAVA_PATH
+    missing = valid_doc(sha, path)
+    del missing["checks"][0]["kind"]
+    assert validate_plan(missing, allowed_commits={sha}, material_files={path}) == []
+    assert missing["checks"][0]["kind"] == "table"
+
+    blank = valid_doc(sha, path)
+    blank["checks"][0]["kind"] = "  "
+    assert validate_plan(blank, allowed_commits={sha}, material_files={path}) == []
+    assert blank["checks"][0]["kind"] == "table"
+
+    api = valid_doc(sha, path)
+    api["checks"][0]["kind"] = "api"
+    errors = validate_plan(api, allowed_commits={sha}, material_files={path})
+    assert any("api" in item and "table" in item for item in errors)
+    assert api["checks"][0]["kind"] == "api"
+
+
+def _case_for(doc, case_id, check_id, start, source, table):
+    case = json.loads(json.dumps(doc["cases"][0]))
+    case["id"] = case_id
+    case["check_id"] = check_id
+    case["start"] = start
+    check = json.loads(json.dumps(doc["checks"][0]))
+    check["id"] = check_id
+    check["source"] = source
+    check["table"] = table
+    return case, check
+
+
+def test_same_route_tabs_stay_even_when_the_screenshot_omits_them():
+    sha = "c" * 40
+    path = JAVA_PATH
+    shown = "甲页签"
+    hidden = "范围-报告"
+    other = "别的页面"
+    pages = [
+        _bound_page("app/ShownController.java:2", "shown_bill", shown),
+        _bound_page("app/RangeController.java:8", "range_report", hidden),
+        _bound_page("app/OtherController.java:3", "other_bill", other, route="/other"),
+    ]
+    doc = valid_doc(sha, path)
+    doc["ui"]["pages"] = [{"title_text": "结算-页", "path": ""}]
+    doc["ui"]["surfaces"] = [shown, "还没有的页签"]
+    doc["cases"][0]["start"] = "结算-页 - 甲页签"
+    doc["cases"][0]["goal"] = "把准备的输入填进条件，做查询，读页面上的结果条数。"
+    doc["cases"][0]["expect_text"] = ["结果条数"]
+    doc["checks"][0]["source"] = "app/ShownController.java:2"
+    doc["checks"][0]["table"] = "shown_bill"
+    extra_case, extra_check = _case_for(
+        doc, "C2", "K2", "结算-页 - 范围-报告", "app/RangeController.java:8", "range_report",
+    )
+    doc["cases"].append(extra_case)
+    doc["checks"].append(extra_check)
+    doc["open"] = [{
+        "id": "open-missing",
+        "question": "还没有的页签代码里没有同名页，要不要测？",
+        "needs_decision": True,
+        "decision": "",
+    }]
+    assert validate_plan(
+        doc, allowed_commits={sha}, material_files={path}, has_images=True, page_index=pages,
+    ) == []
+
+    doc["cases"].pop()
+    doc["checks"].pop()
+    errors = validate_plan(
+        doc, allowed_commits={sha}, material_files={path}, has_images=True, page_index=pages,
+    )
+    assert any("要写成用例" in item and hidden in item and "range_report" in item for item in errors)
+    assert not any("删掉这条用例" in item for item in errors)
+    assert not any("不要编用例" in item and hidden in item for item in errors)
+
+    stray_case, stray_check = _case_for(
+        doc, "C3", "K3", "结算-页 - 别的页面", "app/OtherController.java:3", "other_bill",
+    )
+    doc["cases"].append(stray_case)
+    doc["checks"].append(stray_check)
+    errors = validate_plan(
+        doc, allowed_commits={sha}, material_files={path}, has_images=True, page_index=pages,
+    )
+    assert any("不在这一页的代码里" in item and other in item for item in errors)
+
+    pictured = valid_doc(sha, path)
+    pictured["ui"]["pages"] = [{"title_text": "结算-页", "path": ""}]
+    pictured["ui"]["surfaces"] = [hidden]
+    pictured["cases"][0]["start"] = hidden
+    pictured["cases"][0]["goal"] = "把准备的输入填进条件，做查询，读页面上的结果条数。"
+    pictured["cases"][0]["expect_text"] = ["结果条数"]
+    pictured["checks"][0]["source"] = "app/RangeController.java:8"
+    pictured["checks"][0]["table"] = "range_report"
+    errors = validate_plan(
+        pictured, allowed_commits={sha}, material_files={path}, has_images=True, page_index=pages[:2],
+    )
+    assert any("不要只写页签" in item for item in errors)
+    assert not any("不在这一页的代码里" in item for item in errors)
+
+
+def test_propose_sends_the_page_index_and_fills_the_front_route(tmp_path):
+    sha = "c" * 40
+    path = JAVA_PATH
+    youzan = "app/YouZanBillController.java:4"
+    page = _bound_page(youzan, "bfrs_you_zan_bill")
+    seen = []
+    doc = valid_doc(sha, path)
+    doc["ui"]["pages"] = [{"title_text": "结算页", "path": ""}]
+    doc["ui"]["surfaces"] = ["有赞账单"]
+    doc["cases"][0]["start"] = "结算页 - 有赞账单"
+    doc["checks"][0]["source"] = youzan
+    doc["checks"][0]["table"] = "bfrs_you_zan_bill"
+
+    def complete(key, payload):
+        seen.append(payload)
+        return model_result(doc)
+
+    run = tmp_path / "indexed"
+    run.mkdir()
+    (run / "state.json").write_text(json.dumps({
+        "requirement": {"id": "DSDD-123", "body_file": "requirement.txt"},
+        "allowed_databases": ["oms3_onlinepublish_biz"],
+        "events": [],
+    }), encoding="utf-8")
+    (run / "requirement.txt").write_text("确认退款\n", encoding="utf-8")
+    assert propose(
+        run, key=KEY, shas=[sha], files=[path], materials="class RefundService {}",
+        complete=complete, pages=[page],
+    ) == 4
+    body = json.loads(seen[0]["messages"][1]["content"])
+    assert body["pages"][0]["tab"] == "有赞账单"
+    assert body["pages"][0]["source"] == youzan
+    saved = json.loads((run / "plan.json").read_text(encoding="utf-8"))
+    assert saved["ui"]["pages"][0]["path"] == "/bill/platformBill"
+    assert any("前端路由" in item["basis"] for item in load(run)["events"])
+
+
 def test_materials_keep_backend_hunks_and_frontend_text(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     init_repo(repo)

@@ -192,11 +192,14 @@ class ProductSession:
         result = self.native.rpc("tools/call", {"name": "query", "arguments": arguments})
         return result if isinstance(result, dict) else {"content": []}
 
-    def click(self, app: str, index: str) -> dict:
-        result = self.native.rpc("tools/call", {"name": "click", "arguments": {
-            "app": app,
-            "element_index": str(index),
-        }})
+    def click(self, app: str, index: str, method: str = "", x: float | None = None, y: float | None = None) -> dict:
+        arguments = {"app": app, "element_index": str(index)}
+        if method:
+            arguments["click_method"] = method
+        if x is not None and y is not None:
+            arguments["x"] = x
+            arguments["y"] = y
+        result = self.native.rpc("tools/call", {"name": "click", "arguments": arguments})
         return result if isinstance(result, dict) else {"content": []}
 
     def set_value(self, app: str, index: str, value: str) -> dict:

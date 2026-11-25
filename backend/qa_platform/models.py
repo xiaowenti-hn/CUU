@@ -7,6 +7,7 @@ class ProjectRecord(BaseModel):
     id: str
     name: str = ""
     repo_path: str = ""
+    front_repo_path: str = ""
     branch: str = ""
     git_remote: str = "origin"
     yunxiao_entry: str = ""

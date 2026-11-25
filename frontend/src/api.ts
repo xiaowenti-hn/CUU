@@ -2,6 +2,7 @@ export type Project = {
   id: string;
   name: string;
   repo_path: string;
+  front_repo_path: string;
   branch: string;
   git_remote: string;
   yunxiao_entry: string;

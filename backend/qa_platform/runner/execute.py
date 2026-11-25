@@ -189,6 +189,19 @@ def open_in_app(app: str, url: str, bundle: str = "") -> None:
         raise OSError(detail)
 
 
+def _page_shows_url(text: str, url: str) -> bool:
+    target = (url or "").rstrip("/")
+    if not target:
+        return False
+    blob = text or ""
+    if target in blob:
+        return True
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").casefold()
+    path = (parsed.path or "").rstrip("/")
+    return bool(host and host in blob.casefold() and path and path in blob)
+
+
 def show_test_page(run_dir: Path, plan: dict, state: dict, session, query, browser, base_url: str) -> tuple[str | None, str]:
     choice = str(state.get("product_browser") or "")
     found = _chosen_browser(session, base_url, choice)
@@ -201,6 +214,19 @@ def show_test_page(run_dir: Path, plan: dict, state: dict, session, query, brows
     path = opening_path(run_dir, plan, state, query)
     url = start_url(base_url, path) if path else base_url.rstrip("/") + "/"
     note(run_dir, step="执行", basis=f"正在用「{app}」打开 {url}")
+    seen = ""
+    getter = getattr(session, "get_app_state", None)
+    if callable(getter):
+        try:
+            raw = getter(app)
+        except (OSError, OcuError, TypeError):
+            raw = {}
+        seen = raw if isinstance(raw, str) else _tool_text(raw)
+        if not seen and isinstance(raw, dict):
+            seen = str(raw.get("text") or "")
+    if _page_shows_url(seen, url):
+        note(run_dir, step="执行", basis="测试页已经打开，不再另开标签")
+        return app, ""
     try:
         if browser is not None:
             browser(app, url)
@@ -343,7 +369,7 @@ def deepseek_model(key: str):
     """同一次执行共用一段对话。上一轮的思考会随回复交回去，下一轮接着想。"""
     messages = [{
         "role": "system",
-        "content": "你在已打开的产品窗口里完成一个目标。每轮只返回一个 JSON，先写 think，再写一个动作：look、type、select、set、click、scroll、press、read、skip 或 done。先走到方案里的起点，再完成这条用例的目标。做法是参考，不要被某一步绑住。要填用页面上真实的输入框。不要写 js，不要改地址。窗口还只有浏览器自身控件时不要 skip。已经能填写、并且起点里的界面名确实不在时才 skip。没有库里的数据时 skip，text 写没有数据。走到起点之后，方案里要出现的结果出现了才 done。准备的值是测试输入。页面上名称正好是「共 N 条」时，这个条数就是查询结果，可以和输入条数不同，这时每个输入值不必再出现在列表里。还没有这种结果时，写入的每个值都要出现在录入控件以外。空表上的 0 和「查询完成」不是要对照的结果。",
+        "content": "你在已打开的产品窗口里完成目标。每轮只返回一个 JSON，先写 think，再写一个动作：look、type、select、set、click、scroll、press、read、skip 或 done。",
     }]
     thinking = True
 
@@ -569,9 +595,11 @@ def _observed_state(run_dir: Path, case: dict, query) -> str | None:
 DANGEROUS = ("重转", "删除", "作废", "审核", "手工转化", "手工下载", "提交")
 ENTRY_ROLES = {"textfield", "textarea", "searchfield", "combobox", "textbox", "searchbox"}
 LIST_ROLES = {"cell", "row", "column", "columnheader", "gridcell", "table", "grid", "list", "outline"}
+CLICK_ROLES = {"button", "checkbox", "radiobutton", "radio", "tab", "link", "menuitem", "popupbutton"}
 ROUND_LIMIT = 20
 UNREADY_LIMIT = 3
 PAGE_NOT_OPEN = "测试页没有打开"
+SHAPE_HINT = "text 写控件名，value 写要填的内容。"
 _CHROME_WORDS = ("地址和搜索栏", "地址栏", "网址栏", "标签栏", "标签条", "重新加载", "刷新按钮", "后退按钮", "前进按钮")
 _HIDDEN_WORDS = ("当前部署的页面没有", "当前部署的界面没有")
 
@@ -614,8 +642,8 @@ def _is_dangerous(label: str) -> bool:
     return any(text == word or text.startswith(word) for word in DANGEROUS)
 
 
-def _match_index(result: dict, wanted: str = "", role: str = "") -> str | None:
-    """只点名称对得上的控件。填写只认输入框，不认列表里的同名列。"""
+def _pick_match(result: dict, wanted: str = "", role: str = "") -> dict | None:
+    """只点名称对得上的控件。填写只认输入框。同名时先认输入框，再认能点的控件，最后才是文字。"""
     matches = _matches(result)
     if not matches or _is_dangerous(wanted):
         return None
@@ -624,11 +652,13 @@ def _match_index(result: dict, wanted: str = "", role: str = "") -> str | None:
     def allowed(item: dict) -> bool:
         label = _control_label(item)
         kind = str(item.get("role") or "")
-        if _is_dangerous(label):
+        if _is_dangerous(label) or _is_chrome_control(label):
             return False
         if not label:
             return False
-        if wanted and wanted not in label and label not in wanted:
+        if wanted and (_is_chrome_control(wanted) or (wanted not in label and label not in wanted)):
+            return False
+        if wanted and label != wanted and _role_key(kind) in CLICK_ROLES:
             return False
         if wanted_role in {"textbox", "text", "searchbox"}:
             return _is_entry(kind)
@@ -637,14 +667,126 @@ def _match_index(result: dict, wanted: str = "", role: str = "") -> str | None:
         return True
 
     pool = [item for item in matches if allowed(item)]
-    exact = [item for item in pool if _control_label(item) == wanted] if wanted else []
-    chosen = exact[0] if exact else (pool[0] if pool else None)
+    exact = [item for item in pool if wanted and _control_label(item) == wanted]
+    ranked = exact or pool
+    if not wanted_role and exact:
+        entries = [item for item in exact if _is_entry(str(item.get("role") or ""))]
+        actions = [item for item in exact if _role_key(str(item.get("role") or "")) in CLICK_ROLES]
+        if entries:
+            ranked = entries
+        elif actions:
+            ranked = actions
+    chosen = ranked[0] if ranked else None
+    return chosen if isinstance(chosen, dict) else None
+
+
+def _match_index(result: dict, wanted: str = "", role: str = "") -> str | None:
+    chosen = _pick_match(result, wanted, role)
     if not isinstance(chosen, dict):
         return None
     for key in ("element_index", "index"):
         if chosen.get(key) is not None:
             return str(chosen[key])
     return None
+
+
+def _needs_pointer(item: dict) -> bool:
+    """静态文字没有按下动作，辅助功能点下去只会把鼠标停在字上。"""
+    kind = str(item.get("role") or "")
+    if _is_entry(kind) or _is_list_field(kind):
+        return False
+    return _role_key(kind) not in CLICK_ROLES
+
+
+_TREE_ROLES = CLICK_ROLES | {"按钮", "单选按钮", "单选", "标签", "链接", "菜单项", "弹出式按钮", "复选框"}
+
+
+def _state_text(result: dict) -> str:
+    if isinstance(result, dict) and "content" not in result:
+        return str(result.get("text") or "")
+    parts = []
+    for item in (result or {}).get("content") or []:
+        if isinstance(item, dict) and item.get("type") == "text":
+            parts.append(str(item.get("text") or ""))
+    return "\n".join(parts)
+
+
+def _app_tree(session, app: str) -> str:
+    getter = getattr(session, "get_app_state", None)
+    if not callable(getter):
+        return ""
+    try:
+        result = getter(app, include_screenshot=False)
+    except TypeError:
+        try:
+            result = getter(app)
+        except (OSError, OcuError, TypeError):
+            return ""
+    except (OSError, OcuError):
+        return ""
+    return _state_text(result if isinstance(result, dict) else {})
+
+
+def _tree_control(tree: str, wanted: str) -> str | None:
+    """整页树会把按钮里的文字写在按钮那一行。按名字查询常常只返回里面的静态文字。"""
+    name = (wanted or "").strip()
+    if not name or not tree:
+        return None
+    for raw in tree.splitlines():
+        line = raw.strip()
+        match = re.match(r"^(\d+)\s+(\S+)\s+(.*)$", line)
+        if not match:
+            continue
+        index, role, rest = match.group(1), match.group(2), match.group(3)
+        if role not in _TREE_ROLES and _role_key(role) not in CLICK_ROLES:
+            continue
+        label = re.split(r"\s+Frame:", rest, maxsplit=1)[0].strip()
+        if label == name and not _is_dangerous(label) and not _is_chrome_control(label):
+            return index
+    return None
+
+
+def _bounds_center(item: dict) -> tuple[float, float] | None:
+    bounds = item.get("bounds")
+    if not isinstance(bounds, dict):
+        return None
+    try:
+        x = float(bounds["x"])
+        y = float(bounds["y"])
+        width = bounds.get("w", bounds.get("width"))
+        height = bounds.get("h", bounds.get("height"))
+        w = float(width)
+        h = float(height)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return x + w / 2, y + h / 2
+
+
+def _press(session, app: str, item: dict, name: str = "") -> bool:
+    """点同名的真实控件。只有树里也没有按钮时，才按文字的位置点。返回是否点到了控件。"""
+    index = ""
+    for key in ("element_index", "index"):
+        if item.get(key) is not None:
+            index = str(item[key])
+            break
+    if not index:
+        raise OcuError("没有控件编号")
+    if _needs_pointer(item):
+        parent = _tree_control(_app_tree(session, app), name or _control_label(item))
+        if parent:
+            session.click(app, parent)
+            return True
+        point = _bounds_center(item)
+        if point is not None:
+            try:
+                session.click(app, index, "app_post", point[0], point[1])
+                return False
+            except TypeError:
+                pass
+    session.click(app, index)
+    return not _needs_pointer(item)
 
 
 def drive_plan(session, app: str, steps: list, typed: str, tell=None) -> str:
@@ -658,12 +800,16 @@ def drive_plan(session, app: str, steps: list, typed: str, tell=None) -> str:
         action = str(step.get("action") or "click")
         if tell:
             tell(f"正在页面上找「{name or role}」")
+        item = None
+        index = None
         if action == "type":
             index, _found = _entry_index(session, app, name)
+            if not index:
+                raise LookupError(name or role)
         else:
-            index = _match_index(session.query(app, name, role), name, role)
-        if not index:
-            raise LookupError(name or role)
+            item = _pick_match(session.query(app, name, role), name, role)
+            if item is None:
+                raise LookupError(name or role)
         if action == "type":
             value = typed or str(step.get("value") or "")
             if value in {"使用库里已有交易号", "使用库里已有数据"}:
@@ -678,22 +824,22 @@ def drive_plan(session, app: str, steps: list, typed: str, tell=None) -> str:
         elif action == "select":
             if tell:
                 tell(f"正在点开「{name}」")
-            session.click(app, index)
+            _press(session, app, item, name)
             option = str(step.get("option") or "")
             if option and "请选择" not in option:
-                option_index = _match_index(session.query(app, option, ""))
-                if option_index:
-                    session.click(app, option_index)
+                option_item = _pick_match(session.query(app, option, ""), option, "")
+                if option_item:
+                    _press(session, app, option_item, option)
             done.append(f"已点开「{name}」")
         else:
             if tell:
                 tell(f"正在点击「{name}」")
-            session.click(app, index)
+            _press(session, app, item, name)
             done.append(f"已点击「{name}」")
     return "；".join(done)
 
 
-def _read_repo(repo: str, relative: str) -> str:
+def _read_repo(repo: str, relative: str, front_path: str = "") -> str:
     root = Path(repo).resolve() if repo else None
     if root is None or not root.is_dir():
         return "没有项目目录"
@@ -701,7 +847,7 @@ def _read_repo(repo: str, relative: str) -> str:
     if not cleaned or cleaned.startswith("/") or ".." in Path(cleaned).parts:
         return "只能读项目里的相对路径"
     path = (root / cleaned).resolve()
-    front = _front_root(root)
+    front = _front_root(root, front_path)
     if (not str(path).startswith(str(root) + os.sep) or not path.is_file()) and front is not None:
         path = (front / cleaned).resolve()
         root = front
@@ -723,6 +869,8 @@ def _useful_page(rows: list[str]) -> str:
     entries: list[str] = []
     actions: list[str] = []
     for row in rows:
+        if _is_chrome_control(row):
+            continue
         low = row.lower()
         if any(word in low for word in ("textfield", "textarea", "searchfield", "combobox", "textbox")):
             entries.append(row)
@@ -789,12 +937,10 @@ _FRONT_SKIP = {"node_modules", "dist", ".git"}
 _SCAN_LIMIT = 4000
 
 
-def _front_root(repo: Path) -> Path | None:
-    sibling = repo.parent / f"{repo.name}-front"
-    src = sibling / "src"
-    if src.is_dir() and not src.is_symlink():
-        return sibling
-    return None
+def _front_root(repo: Path, configured: str = "") -> Path | None:
+    from qa_platform.runner.page_index import front_root
+
+    return front_root(repo, configured)
 
 
 def _placeholder(front: Path, token: str) -> str:
@@ -900,7 +1046,7 @@ def _view_dir(front: Path, imported: str) -> Path | None:
     return view
 
 
-def implementation_brief(repo: str, source: str) -> str:
+def implementation_brief(repo: str, source: str, front_path: str = "") -> str:
     """从方案出处指向的控制器，按它的接口路径到前端里找页签和筛选项。"""
     root = Path(repo).resolve() if repo else None
     if root is None or not root.is_dir() or not source:
@@ -917,12 +1063,14 @@ def implementation_brief(repo: str, source: str) -> str:
     if found:
         class_name = found.group(1)
     mapping = ""
-    found = re.search(r'@RequestMapping\("([^"]+)"\)', java)
+    found = re.search(r'@RequestMapping\(\s*(?:(?:value|path)\s*=\s*)?"([^"{}]+)"\)', java)
     if found:
-        mapping = found.group(1)
+        mapping = found.group(1).strip()
+        if mapping and not mapping.startswith("/") and " " not in mapping:
+            mapping = "/" + mapping
     tab = ""
     fields: list[str] = []
-    front = _front_root(root)
+    front = _front_root(root, front_path)
     if front is not None and mapping.startswith("/") and ".." not in mapping:
         hit = _mapping_file(front / "src", mapping)
         folder = hit.parent.name if hit is not None and hit.name.startswith("index.") else ""
@@ -934,7 +1082,7 @@ def implementation_brief(repo: str, source: str) -> str:
                 fields = _filter_lines(front, view)
     lines = [f"代码实现：{class_name} {mapping}".strip()]
     if tab:
-        lines.append(f"页面页签是「{tab}」。先点这个页签，再操作它下面的筛选。")
+        lines.append(f"页面页签是「{tab}」。")
     if fields:
         lines.append("筛选项：" + "；".join(fields[:8]))
     lines.append(f"出处文件：{relative}")
@@ -976,7 +1124,7 @@ def _how_line(step: dict) -> str:
     return f"- {action}「{name}」{extra}"
 
 
-def _plan_brief(case: dict, plan: dict, phase: str, typed: str, repo: str = "", requirement: str = "") -> str:
+def _plan_brief(case: dict, plan: dict, phase: str, typed: str, repo: str = "", requirement: str = "", front_path: str = "") -> str:
     from qa_platform.runner.planner import acceptance_criteria, case_goal, case_start
 
     criteria = acceptance_criteria(requirement)
@@ -984,10 +1132,7 @@ def _plan_brief(case: dict, plan: dict, phase: str, typed: str, repo: str = "", 
         f"任务：{case.get('id') or ''} {case.get('title') or ''}".strip(),
         f"目标：{case_goal(case)}",
         f"起点：{case_start(case, plan)}",
-        "做法是参考。还没走到起点时，不要按下面的做法填写或点击。",
-        "以当前页面上的控件为准，对不上就换控件。",
-        "不要点重转、删除、作废、审核、手工转化、手工下载、提交，也不要点表格里的列名。",
-        "对不上就重新看当前页面，换一个控件。做法只是参考。",
+        "做法只是参考。以当前页面为准。",
     ]
     if criteria:
         lines.append("要验证：")
@@ -1019,7 +1164,7 @@ def _plan_brief(case: dict, plan: dict, phase: str, typed: str, repo: str = "", 
             if check.get("source"):
                 lines.append(f"相关代码：{check.get('source')}")
             break
-    code = implementation_brief(repo, source)
+    code = implementation_brief(repo, source, front_path)
     if code:
         lines.append("页面线索：")
         lines.append(code)
@@ -1051,6 +1196,49 @@ def _entry_index(session, app: str, text: str) -> tuple[str | None, dict]:
     return None, found
 
 
+def _clip_label(text: str, limit: int = 24) -> str:
+    raw = text.strip()
+    if len(raw) <= limit:
+        return raw
+    return f"{raw[:limit]}…"
+
+
+def _looks_like_payload(text: str, prepared: str) -> bool:
+    """控件名槽里塞进了要填的数据：整串准备值、其中一条、逗号串，或一长串数字。"""
+    raw = text.strip()
+    if not raw:
+        return False
+    ready = prepared.strip()
+    if ready and raw == ready:
+        return True
+    ids = [item.strip() for item in ready.split(",") if item.strip()] if ready else []
+    if raw in ids:
+        return True
+    if "," in raw and len(raw) > 12:
+        return True
+    return raw.isdigit() and len(raw) >= 6
+
+
+def _short_label(text: str, prepared: str) -> bool:
+    raw = text.strip()
+    return bool(raw) and len(raw) <= 24 and not _looks_like_payload(raw, prepared)
+
+
+def _entry_for_payload(session, app: str, value: str, fill_names: list[str], prepared: str) -> tuple[str | None, str]:
+    ordered: list[str] = []
+    label = value.strip()
+    if _short_label(label, prepared):
+        ordered.append(label)
+    for name in fill_names:
+        if name not in ordered:
+            ordered.append(name)
+    for name in ordered:
+        index, _found = _entry_index(session, app, name)
+        if index:
+            return index, name
+    return None, ""
+
+
 def _step_targets(case: dict, phase: str) -> tuple[list[str], list[str], list[str]]:
     fill: list[str] = []
     click: list[str] = []
@@ -1071,15 +1259,26 @@ def _step_targets(case: dict, phase: str) -> tuple[list[str], list[str], list[st
     return fill, click, select
 
 
+def _is_selected(item: dict) -> bool:
+    for key in ("selected", "AXSelected"):
+        value = item.get(key)
+        if value is True or str(value).lower() in {"true", "1", "yes"}:
+            return True
+    blob = " ".join(str(item.get(key) or "") for key in ("description", "value", "title", "state"))
+    return "selected" in blob.lower() or "选中" in blob
+
+
 def _format_control(item: dict) -> str:
     kind = str(item.get("role") or "")
     label = _control_label(item)
-    if _is_dangerous(label):
+    if _is_dangerous(label) or _is_chrome_control(label):
         mark = "不要点"
     elif _is_entry(kind):
         mark = "可填写"
     elif _is_list_field(kind):
         mark = "列表字段"
+    elif _is_selected(item):
+        mark = "已选中"
     else:
         mark = ""
     return f"名称「{label}」 {kind} {mark}".strip()
@@ -1092,9 +1291,10 @@ def _collect_named(session, app: str, name: str, want_entry: bool) -> list[dict]
     return items
 
 
-def _observe_page(session, app: str, fill_names: list[str], click_names: list[str], select_names: list[str] | None = None, *, announce: bool = True) -> str:
+def _observe_page(session, app: str, fill_names: list[str], click_names: list[str], select_names: list[str] | None = None, *, announce: bool = True, tab_names: list[str] | None = None) -> str:
     """挑出页面上和这条用例相关的控件。还没走到起点时不宣布打算填写或点击。"""
     select_names = select_names or []
+    tab_names = tab_names or []
     lines: list[str] = []
     if announce and fill_names:
         lines.append("参考做法要填：" + "、".join(f"「{name}」" for name in fill_names) + "。填的是输入框。")
@@ -1126,12 +1326,28 @@ def _observe_page(session, app: str, fill_names: list[str], click_names: list[st
                     if not key[0] or key in seen:
                         continue
                     seen.add(key)
+                    if _is_chrome_control(key[0]):
+                        continue
                     if _is_dangerous(key[0]):
                         not_entry.append(_format_control(item))
                     else:
                         clickable.append(_format_control(item))
+            for name in tab_names[:8]:
+                if name in fill_names or name in click_names or name in select_names:
+                    continue
+                for item in _collect_named(session, app, name, False):
+                    key = (_control_label(item), _role_key(str(item.get("role") or "")))
+                    if not key[0] or key in seen or _is_chrome_control(key[0]):
+                        continue
+                    seen.add(key)
+                    clickable.append(_format_control(item))
         except (OSError, OcuError, TypeError):
             pass
+    tabs = [row for row in clickable if any(name and name in row for name in tab_names)]
+    if tabs:
+        lines.append("当前页签：")
+        lines.extend(f"- {row}" for row in tabs[:8])
+        clickable = [row for row in clickable if row not in tabs]
     if fillable:
         lines.append("当前能填：")
         lines.extend(f"- {row}" for row in fillable[:12])
@@ -1152,21 +1368,10 @@ def _observe_page(session, app: str, fill_names: list[str], click_names: list[st
 def _agent_prompt(brief: str, repo: str, page: str, history: list[str], situation: str) -> str:
     done = "\n".join(history[-8:]) or "还没有"
     return "\n".join([
-        "你在已打开的产品窗口里完成下面的当前目标。每轮只做一个动作，动作由你按当前目标来定。",
-        "做法是参考，不是这一轮必须执行的脚本。",
-        "「当前能填 / 能点」只有走到起点之后才用来填写。同名按钮和列表列不要点。",
-        "动作：look 看结果；type 填输入框；select 点开下拉再选，带 option；set 勾选；click 按钮或入口；scroll 被挡住时滚动；press 按键，填写后查询用 Return；read 读代码；skip 只在已经走到承载这一页的界面、且起点里的名字确实不在时使用。窗口还只有浏览器自身控件时不要 skip。",
-        "重转、删除、作废、审核、手工转化、提交不会点。先写一句 think。",
-        "{\"think\":\"...\",\"action\":\"look\",\"text\":\"页面上应出现的字\"}",
-        "{\"think\":\"...\",\"action\":\"type\",\"text\":\"输入框上的字\",\"value\":\"\"}",
-        "{\"think\":\"...\",\"action\":\"select\",\"text\":\"下拉上的字\",\"option\":\"要选的项\"}",
-        "{\"think\":\"...\",\"action\":\"set\",\"text\":\"勾选框上的字\"}",
-        "{\"think\":\"...\",\"action\":\"click\",\"text\":\"按钮上的字\"}",
-        "{\"think\":\"...\",\"action\":\"scroll\",\"text\":\"被挡住的区域\",\"direction\":\"down\"}",
-        "{\"think\":\"...\",\"action\":\"press\",\"key\":\"Return\"}",
-        "{\"think\":\"...\",\"read\":\"相对路径\"}",
-        "{\"think\":\"...\",\"action\":\"skip\",\"text\":\"当前部署的界面没有这一项\"}",
-        "还没走到起点时不要 done，也不要按参考做法去填。走到之后，方案里要出现的文字已经出现，才 {\"think\":\"...\",\"done\":true}。准备的值是测试输入。页面上名称正好是「共 N 条」时，这个条数就是查询结果，可以和输入条数不同，这时不必再要求每个输入值都出现在列表里。还没有这种结果时，写入的每个值都要出现在录入控件以外。空表上的 0 和「查询完成」不是要对照的结果。value 留空则用这一条准备的全部数据。",
+        "你在已经打开的产品窗口里完成目标。每轮看当前页面，只做一个动作，先写 think。",
+        '每轮一个 JSON。text 是控件名，value 是要填的内容：{"think":"","action":"type","text":"控件名","value":"要填的内容"}。读代码：{"read":"相对路径"}。',
+        "方案只说明要测什么。按你在页面上看见的菜单、页签、输入框去做。对不上可以读这一页的前端，再看一次页面。窗口还只是浏览器时不要操作。当前部署没有这一项就 skip。",
+        "不要点重转、删除、作废、审核、手工转化、提交，也不要点表格列名。",
         situation,
         f"项目目录：{repo or '没有'}",
         brief,
@@ -1309,6 +1514,40 @@ def _probe_count(session, app: str) -> str:
     return "\n".join(lines)
 
 
+def _with_count(session, app: str, page: str, wanted: bool) -> tuple[str, str]:
+    """这条用例要看条数时，把页面上的「共 N 条」补进当前页。不要条数时不查。"""
+    if not wanted:
+        return page, ""
+    from qa_platform.runner.report import page_result_count
+
+    found = _probe_count(session, app)
+    if not found:
+        return page, ""
+    if page_result_count(page):
+        return page, found
+    return (f"{page}\n{found}" if page else found), found
+
+
+def _exact_seen(result: dict, wanted: str) -> str:
+    """点完只回看名称正好是这个字的控件。浏览器外壳和更长的名字不带上。"""
+    lines = []
+    for item in _matches(result):
+        label = _control_label(item)
+        if not label or label != wanted or _is_chrome_control(label) or _is_dangerous(label):
+            continue
+        kind = str(item.get("role") or "")
+        mark = " 列表字段" if _is_list_field(kind) else (" 可以填写" if _is_entry(kind) else "")
+        lines.append(
+            f"{item.get('element_index') or item.get('index') or ''} "
+            f"{kind} 名称「{label}」{mark}".strip()
+        )
+        if len(lines) >= 4:
+            break
+    if lines:
+        return "\n".join(lines)
+    return f"页面上没有名称正好是「{_clip_label(wanted)}」的控件。"
+
+
 def _page_for_result(session, app: str, page: str, case: dict, phase: str, typed: str) -> str:
     from qa_platform.runner.report import expects_result_count, filled_values, page_result_count, proof_texts
 
@@ -1447,7 +1686,10 @@ def _name_facts(session, app: str, names: list[str], page: str) -> tuple[bool, l
                     longer = label
                     break
         if exact:
-            lines.append(f"起点「{name}」：当前窗口里有一个控件就叫这个名字。")
+            if _named_selected(session, app, name) is False:
+                lines.append(f"起点「{name}」：页面上有这个页签，当前还没选中。")
+            else:
+                lines.append(f"起点「{name}」：当前窗口里有一个控件就叫这个名字。")
         else:
             arrived = False
             line = f"起点「{name}」：当前窗口里没有一个控件就叫这个名字。"
@@ -1457,27 +1699,25 @@ def _name_facts(session, app: str, names: list[str], page: str) -> tuple[bool, l
     return arrived, lines
 
 
-def _page_before_arrival(page: str) -> str:
-    """没走到起点时，不把参考做法和待填控件说成这一轮的任务。"""
-    kept = []
-    skipping = False
-    for line in page.splitlines():
-        if line.startswith(("参考做法", "这一步打算", "当前能填", "同名但不是输入框", "当前能点")):
-            skipping = True
-            continue
-        if skipping and line.startswith("- "):
-            continue
-        skipping = False
-        kept.append(line)
-    return "\n".join(kept)
+def _named_selected(session, app: str, name: str) -> bool | None:
+    query = getattr(session, "query", None)
+    if not name or not callable(query):
+        return None
+    try:
+        items = _matches(query(app, name, ""))
+    except (OSError, OcuError, TypeError):
+        return None
+    found = [item for item in items if _control_label(item) == name]
+    if not found:
+        return None
+    if any(_is_selected(item) for item in found):
+        return True
+    if any(_role_key(str(item.get("role") or "")) in {"tab", "radiobutton", "radio"} for item in found):
+        return False
+    return None
 
 
-def _situation(goal: str, names: list[str], arrived: bool, facts: list[str], url: str, previous: str | None, last: str) -> str:
-    if not names or arrived:
-        current = f"当前目标：{goal}"
-    else:
-        joined = "」、「".join(names)
-        current = f"当前目标：走到起点「{joined}」。"
+def _situation(goal: str, facts: list[str], url: str, previous: str | None, last: str, target: str = "") -> str:
     if not url:
         where = "窗口地址：这一轮没有读到地址。"
     elif previous is None:
@@ -1486,9 +1726,9 @@ def _situation(goal: str, names: list[str], arrived: bool, facts: list[str], url
         where = f"窗口地址：{url}，和上一轮一样。"
     else:
         where = f"窗口地址：已从 {previous} 变为 {url}。"
-    lines = [current, where, *facts]
-    if names and arrived:
-        lines.append("起点：已经走到。")
+    lines = [f"当前目标：{goal}", where, *facts]
+    if target:
+        lines.append(f"这一条要测页签「{target}」。当前不是这一项就先点它。")
     lines.append(f"上一动作：{last or '还没有。'}")
     return "\n".join(lines)
 
@@ -1531,11 +1771,22 @@ def _chrome_only(page: str) -> bool:
     return True
 
 
+def _login_page(page: str) -> bool:
+    url = _window_url(page)
+    if not url:
+        return False
+    path = urlparse(url).path or ""
+    return bool(re.search(r"/(?:login|signin|sign-in|sso|auth)(?:/|$)", path, flags=re.I))
+
+
 def _window_unready(page: str, base_url: str) -> bool:
     """当前窗口还不是这次要测的产品页。"""
-    if _window_host_ready(page, base_url) is False:
+    host = _window_host_ready(page, base_url)
+    if host is False:
         return True
-    return _chrome_only(page)
+    if _chrome_only(page) or _login_page(page):
+        return True
+    return host is not True and not _product_shell(page)
 
 
 def _mentioned(page: str, name: str) -> bool:
@@ -1576,17 +1827,6 @@ def _model_skip_reason(text: str) -> str:
     return reason
 
 
-def _named_missing(session, app: str, name: str) -> bool:
-    query = getattr(session, "query", None)
-    if not name or not callable(query):
-        return False
-    try:
-        found = query(app, name, "")
-    except (OSError, OcuError, TypeError):
-        return False
-    return _page_lines(found, name).startswith("页面上没有找到")
-
-
 def _page_probe(text: str, target: str, case: dict) -> bool:
     name = text.strip()
     if not target or not name or name in _control_names(case):
@@ -1599,6 +1839,17 @@ def _page_probe(text: str, target: str, case: dict) -> bool:
 def _is_address_bar(text: str) -> bool:
     name = text.strip()
     return "地址和搜索" in name or name in {"地址栏", "网址栏"}
+
+
+def _is_chrome_control(text: str) -> bool:
+    name = (text or "").strip()
+    if not name:
+        return False
+    if _is_address_bar(name):
+        return True
+    if any(word in name for word in _CHROME_WORDS):
+        return True
+    return "搜索标签页" in name or "内存使用率" in name
 
 
 def _skip_case(run_dir, state, case, session, app: str, reason: str, base_url: str) -> None:
@@ -1648,7 +1899,10 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
     case["data_empty"] = empty_data
     from qa_platform.runner.baseline import _requirement_text
     from qa_platform.runner.planner import case_goal
-    brief = _plan_brief(case, plan, phase, typed, repo, _requirement_text(run_dir, state))
+    brief = _plan_brief(
+        case, plan, phase, typed, repo, _requirement_text(run_dir, state),
+        str(state.get("front_repo_path") or ""),
+    )
     target = _target_page_name(case, brief)
     if target:
         case["surface_name"] = target
@@ -1662,12 +1916,15 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
     reads = 0
     acted = False
     unready = 0
-    arrived = False
     noted_fill = False
     previous_url: str | None = None
     last_action = ""
     tried_clicks: set[tuple[str, str]] = set()
     fill_names, click_names, select_names = _step_targets(case, phase)
+    from qa_platform.runner.report import expects_result_count, page_result_count
+
+    wants_count = expects_result_count(case, phase)
+    count_line = ""
     note(run_dir, step="执行", basis=f"正在对照测试方案和项目代码，操作「{app}」里的 {case.get('id') or ''}")
     ask = ask or _ask_to_continue
     closed = False
@@ -1685,15 +1942,6 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
         closed = True
         return 0
 
-    def can_hide() -> bool:
-        return bool(
-            target
-            and shell
-            and not _window_unready(page, base_url)
-            and not _surface_known(state, target)
-            and _named_missing(session, app, target)
-        )
-
     def finish_skip(model_text: str) -> int | None:
         nonlocal closed
         from qa_platform.runner.report import NO_DATA
@@ -1701,26 +1949,28 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
             _skip_case(run_dir, state, case, session, app, NO_DATA, base_url)
             closed = True
             return 0
+        if _window_unready(page, base_url):
+            history.append("窗口还只是浏览器。先打开产品页，不要跳过。")
+            note(run_dir, step="执行", basis=history[-1])
+            return None
         if target and (_surface_known(state, target) or _mentioned(page, target)):
             _mark_surface(run_dir, state, target)
             _skip_case(run_dir, state, case, session, app, _model_skip_reason(model_text), base_url)
             closed = True
             return 0
-        if _window_unready(page, base_url) or not can_hide():
-            history.append("页面还在加载，或还没有确认当前部署没有这一项。继续在当前窗口里做。")
-            note(run_dir, step="执行", basis=history[-1])
-            return None
         return hidden(target)
 
     while True:
         for _ in range(ROUND_LIMIT):
             if manual_stop(run_dir):
                 return leave(2)
-            seen_now = _observe_page(session, app, fill_names, click_names, select_names)
+            seen_now = _observe_page(session, app, fill_names, click_names, select_names, tab_names=names)
             if seen_now:
                 page = seen_now
+            if wants_count and count_line and not page_result_count(page):
+                page = f"{page}\n{count_line}" if page else count_line
             shell = _product_shell(page)
-            arrived, facts = _name_facts(session, app, names, page)
+            _arrived, facts = _name_facts(session, app, names, page)
             if _mentioned(page, target):
                 _mark_surface(run_dir, state, target)
             if _window_unready(page, base_url):
@@ -1731,23 +1981,17 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
                     return 2
             else:
                 unready = 0
-            if not acted and can_hide():
-                return hidden(target)
-            if arrived and shell and not noted_fill:
+            if shell and not noted_fill:
                 note(run_dir, step="执行", basis="页面上已经找到能填的输入框")
                 noted_fill = True
             url = _window_url(page)
             if history:
                 last_action = history[-1][:180]
-            shown = page if arrived else _page_before_arrival(page)
-            situation = _situation(goal, names, arrived, facts, url, previous_url, last_action)
-            if arrived:
-                from qa_platform.runner.report import page_result_count
-
-                count = page_result_count(page)
-                if count:
-                    situation += f"\n页面结果：{count}。这是查询后的条数，和输入条数不同也算结果。"
-            prompt = _agent_prompt(brief, repo, shown, history, situation)
+            situation = _situation(goal, facts, url, previous_url, last_action, target)
+            count = page_result_count(page) if wants_count else ""
+            if count:
+                situation += f"\n页面结果：{count}。这是查询后的条数，和输入条数不同也算结果。"
+            prompt = _agent_prompt(brief, repo, page, history, situation)
             if url:
                 previous_url = url
             try:
@@ -1765,11 +2009,8 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
             if thought:
                 note(run_dir, step="执行", basis=f"想：{thought[:240]}")
                 history.append(thought[:240])
-            if decision.get("done"):
-                if names and not arrived:
-                    history.append("还没有走到起点，不能结束")
-                    note(run_dir, step="执行", basis=history[-1])
-                    continue
+            action = str(decision.get("action") or "").strip()
+            if decision.get("done") is True or action.casefold() == "done":
                 if not acted:
                     history.append("还没有在页面上填写或点击，不能结束")
                     note(run_dir, step="执行", basis=history[-1])
@@ -1789,22 +2030,31 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
                 _close_case(run_dir, state, case, session, app, page, history, phase, typed, base_url)
                 closed = True
                 return 0
-            if decision.get("read"):
-                if can_hide():
-                    return hidden(target)
+            text = _named(str(decision.get("text") or ""))
+            role = str(decision.get("role") or "")
+            read_path = decision.get("read")
+            if action == "read" and not read_path:
+                read_path = decision.get("text") or decision.get("path") or ""
+            if decision.get("read") or action == "read":
+                if _window_unready(page, base_url):
+                    history.append("窗口还只是浏览器，先看页面。")
+                    note(run_dir, step="执行", basis=history[-1])
+                    continue
+                path = str(read_path or "").strip()
+                if not path:
+                    history.append("读代码要带上相对路径。")
+                    note(run_dir, step="执行", basis=history[-1])
+                    continue
                 if reads >= 4:
                     history.append("代码已经看过几次，回到页面")
                     note(run_dir, step="执行", basis=history[-1])
                     continue
                 reads += 1
-                excerpt = _read_repo(repo, str(decision.get("read")))
-                history.append(f"读了 {decision.get('read')}：{excerpt[:500]}")
+                excerpt = _read_repo(repo, path, str(state.get("front_repo_path") or ""))
+                history.append(f"读了 {path}：{excerpt[:500]}")
                 page = page or "还没有看页面"
                 note(run_dir, step="执行", basis=history[-1][:240])
                 continue
-            action = str(decision.get("action") or "")
-            text = _named(str(decision.get("text") or ""))
-            role = str(decision.get("role") or "")
             if action == "skip":
                 ended = finish_skip(str(decision.get("text") or ""))
                 if ended is None:
@@ -1825,33 +2075,50 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
             try:
                 if action == "look" and not text:
                     page = _see_page(session, app) or page or "还没有整页内容"
+                    page, count_line = _with_count(session, app, page, wants_count) if wants_count else (page, count_line)
                     history.append(f"看到当前页面：{page[:400]}")
                 elif action == "look":
                     looked = session.query(app, text, "" if _role_key(role) in {"textbox", "text", "searchbox"} else role)
                     page = _page_lines(looked, text)
                     if page.startswith("页面上没有找到") and role:
                         page = _page_lines(session.query(app, text, ""), text)
-                    if _page_probe(text, target, case) and page.startswith("页面上没有找到") and can_hide():
-                        return hidden(target)
                     if _page_probe(text, target, case) and not page.startswith("页面上没有找到"):
                         _mark_surface(run_dir, state, target)
+                    page, count_line = _with_count(session, app, page, wants_count) if wants_count else (page, count_line)
                     history.append(f"看到「{text}」：{page[:240]}")
                 elif action == "click":
-                    click_role = "" if _role_key(role) in {"textbox", "text", "searchbox"} else role
-                    found = session.query(app, text, click_role)
-                    index = _match_index(found, text, role) or _match_index(session.query(app, text, ""), text, role)
-                    if not index:
-                        if _page_probe(text, target, case) and can_hide():
-                            return hidden(target)
-                        page = f"页面上没有可点的「{text}」。重转、删除、提交不会点。"
-                        history.append(page)
-                        note(run_dir, step="执行", basis=page[:240])
+                    if _is_chrome_control(text):
+                        history.append("不要点浏览器标签页和地址栏。")
+                        note(run_dir, step="执行", basis=history[-1])
                         continue
+                    if _looks_like_payload(text, typed):
+                        history.append(SHAPE_HINT)
+                        note(run_dir, step="执行", basis=history[-1])
+                        continue
+                    pressed = None
+                    if text in fill_names or _role_key(role) in {"textbox", "text", "searchbox"}:
+                        index, _found = _entry_index(session, app, text)
+                        if not index:
+                            history.append(f"「{_clip_label(text)}」是要填的输入框，页面上还没有这个框。")
+                            note(run_dir, step="执行", basis=history[-1])
+                            continue
+                    else:
+                        found = session.query(app, text, role)
+                        pressed = _pick_match(found, text, role) or _pick_match(session.query(app, text, ""), text, role)
+                        if pressed is None:
+                            page = f"页面上没有可点的「{_clip_label(text)}」。重转、删除、提交不会点。"
+                            history.append(page)
+                            note(run_dir, step="执行", basis=page[:240])
+                            continue
                     if manual_stop(run_dir):
                         return leave(2)
                     note(run_dir, step="执行", basis=f"准备点击「{text}」")
                     before = _window_url(page)
-                    session.click(app, index)
+                    if pressed is None:
+                        session.click(app, index)
+                        on_control = True
+                    else:
+                        on_control = _press(session, app, pressed, text)
                     acted = True
                     if _page_probe(text, target, case):
                         _mark_surface(run_dir, state, target)
@@ -1864,48 +2131,56 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
                     elif before and after and before != after:
                         stay = f"窗口已离开原处，现在是 {after}。"
                         tried_clicks.clear()
+                    landed = "" if on_control else "点的是文字，已按它的位置点下去。看它有没有被选中。"
                     last_action = f"点击「{text}」。{stay}".strip()
-                    page = _page_lines(session.query(app, text, ""), text)
-                    history.append(f"已点击「{text}」。{stay}点完看到：{page[:180]}")
+                    page = _exact_seen(session.query(app, text, ""), text)
+                    page, count_line = _with_count(session, app, page, wants_count) if wants_count else (page, count_line)
+                    history.append(f"已点击「{text}」。{stay}{landed}点完看到：{page[:240]}")
                 elif action == "select":
                     option = str(decision.get("option") or "").strip()
-                    index = _entry_index(session, app, text)[0] or _match_index(session.query(app, text, ""), text, role)
-                    if not index:
+                    entry = _entry_index(session, app, text)[0]
+                    opener = None if entry else _pick_match(session.query(app, text, ""), text, role)
+                    if not entry and opener is None:
                         history.append(f"没有可选择的「{text}」")
                         note(run_dir, step="执行", basis=history[-1])
                         continue
                     if manual_stop(run_dir):
                         return leave(2)
                     note(run_dir, step="执行", basis=f"准备选择「{text}」" + (f"为「{option}」" if option else ""))
-                    session.click(app, index)
+                    if entry:
+                        session.click(app, entry)
+                    else:
+                        _press(session, app, opener, text)
                     acted = True
                     if option:
-                        opt = _match_index(session.query(app, option, ""), option, "")
-                        if not opt:
+                        opt_item = _pick_match(session.query(app, option, ""), option, "")
+                        if opt_item is None:
                             page = _page_lines(session.query(app, option, ""), option)
                             history.append(f"已点开「{text}」，没有看到选项「{option}」。看到：{page[:160]}")
                             note(run_dir, step="执行", basis=history[-1][:240])
                             continue
-                        session.click(app, opt)
+                        _press(session, app, opt_item, option)
                     page = _page_lines(session.query(app, option or text, ""), option or text)
                     history.append(f"已选择「{text}」" + (f"为「{option}」" if option else "") + f"。选完看到：{page[:160]}")
                 elif action == "set":
+                    if _looks_like_payload(text, typed):
+                        history.append(SHAPE_HINT)
+                        note(run_dir, step="执行", basis=history[-1])
+                        continue
                     found = session.query(app, text, role)
-                    index = _match_index(found, text, role) or _match_index(session.query(app, text, ""), text, "")
-                    if not index:
-                        history.append(f"没有可勾选的「{text}」")
+                    chosen = _pick_match(found, text, role) or _pick_match(session.query(app, text, ""), text, "")
+                    if chosen is None:
+                        history.append(f"没有可勾选的「{_clip_label(text)}」")
                         note(run_dir, step="执行", basis=history[-1])
                         continue
                     if manual_stop(run_dir):
                         return leave(2)
                     note(run_dir, step="执行", basis=f"准备勾选「{text}」")
-                    session.click(app, index)
+                    _press(session, app, chosen, text)
                     acted = True
                     page = _page_lines(session.query(app, text, ""), text)
                     history.append(f"已勾选「{text}」。勾完看到：{page[:160]}")
                 elif action == "scroll":
-                    if can_hide():
-                        return hidden(target)
                     scroller = getattr(session, "scroll", None)
                     if not callable(scroller):
                         history.append("这一步不能滚动")
@@ -1930,7 +2205,7 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
                     note(run_dir, step="执行", basis=f"准备滚动「{text}」{direction}")
                     scroller(app, index, direction)
                     acted = True
-                    page = _observe_page(session, app, fill_names, click_names, select_names, announce=arrived) or _page_lines(session.query(app, text, ""), text)
+                    page = _observe_page(session, app, fill_names, click_names, select_names, tab_names=names) or _page_lines(session.query(app, text, ""), text)
                     history.append(f"已滚动「{text}」。滚完看到：{page[:180]}")
                 elif action == "press":
                     press = getattr(session, "press_key", None)
@@ -1947,23 +2222,32 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
                     history.append(f"已按 {key}")
                 elif action == "type":
                     if _is_address_bar(text):
-                        if can_hide():
-                            return hidden(target)
-                        if _window_unready(page, base_url):
-                            history.append("页面还在加载。不要改地址。")
-                        else:
-                            history.append("不要改地址。")
+                        history.append("不要改地址。")
                         note(run_dir, step="执行", basis=history[-1])
                         continue
-                    index, found = _entry_index(session, app, text)
-                    if not index:
-                        page = _page_lines(found, text)
-                        if page.startswith("页面上没有找到"):
-                            page = _page_lines(session.query(app, text, ""), text)
-                        history.append(f"没有填「{text}」。这一步看到的是：{page[:240]}")
-                        note(run_dir, step="执行", basis=history[-1][:240])
-                        continue
-                    value = _fill_value(str(decision.get("value") or ""), typed)
+                    value_raw = str(decision.get("value") or "")
+                    if _looks_like_payload(text, typed):
+                        if value_raw.strip() and not _short_label(value_raw, typed):
+                            history.append(SHAPE_HINT)
+                            note(run_dir, step="执行", basis=history[-1])
+                            continue
+                        index, control = _entry_for_payload(session, app, value_raw, fill_names, typed)
+                        if not index:
+                            history.append(SHAPE_HINT)
+                            note(run_dir, step="执行", basis=history[-1])
+                            continue
+                        value = text.strip()
+                        text = control
+                    else:
+                        index, found = _entry_index(session, app, text)
+                        if not index:
+                            page = _page_lines(found, text)
+                            if page.startswith("页面上没有找到"):
+                                page = _page_lines(session.query(app, text, ""), text)
+                            history.append(f"没有填「{_clip_label(text)}」。这一步看到的是：{page[:240]}")
+                            note(run_dir, step="执行", basis=history[-1][:240])
+                            continue
+                        value = _fill_value(value_raw, typed)
                     if not value:
                         history.append("这一步没有给出要填的内容，也没有准备好的数据")
                         note(run_dir, step="执行", basis=history[-1])

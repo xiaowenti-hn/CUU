@@ -439,9 +439,14 @@ def tables_in_code(materials: str) -> list[str]:
     return found
 
 
-def code_table_catalog(database: str, materials: str) -> list[dict]:
+def code_table_catalog(database: str, materials: str, extra_tables: list[str] | None = None) -> list[dict]:
     """这些表在库里真实存在时，带上列名和列注释交给方案。"""
     names = tables_in_code(materials)
+    for name in extra_tables or []:
+        if isinstance(name, str) and IDENT.fullmatch(name) and name not in names:
+            names.append(name)
+        if len(names) >= 80:
+            break
     if not names or IDENT.fullmatch(database) is None or not query_script().is_file():
         return []
     catalog = []
@@ -472,6 +477,7 @@ def code_table_catalog(database: str, materials: str) -> list[dict]:
                 break
         if described:
             catalog.append({
+                "annotation": planned,
                 "table": table,
                 "table_comment": comment,
                 "columns": described,

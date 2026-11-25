@@ -16,6 +16,7 @@ SECRET_KEYS = {"token", "password", "api_key"}
 EDITABLE = (
     "name",
     "repo_path",
+    "front_repo_path",
     "branch",
     "git_remote",
     "yunxiao_entry",
@@ -103,7 +104,7 @@ def coerce_field(key: str, value: object) -> object:
     if not isinstance(value, str):
         raise BodyError(f"{key} 必须是字符串")
     text = value.strip()
-    if key == "repo_path":
+    if key in {"repo_path", "front_repo_path"}:
         return normalize_repo(text)
     if key == "git_remote":
         return text or "origin"
@@ -121,6 +122,7 @@ def blank_project(project_id: str, created_at: str, *, with_default_database: bo
         "id": project_id,
         "name": "",
         "repo_path": "",
+        "front_repo_path": "",
         "branch": "",
         "git_remote": "origin",
         "yunxiao_entry": "",
@@ -358,6 +360,7 @@ def create_run(var_dir: Path, project: dict) -> str:
         "stage": "preflight",
         "stop_reason": "",
         "repo_path": project["repo_path"],
+        "front_repo_path": project.get("front_repo_path") or "",
         "branch": project["branch"],
         "git_remote": project.get("git_remote") or "origin",
         "commit": "",

@@ -12,6 +12,7 @@ const route = useRoute();
 
 const fieldLabels: Record<string, string> = {
   repo_path: "本地仓库",
+  front_repo_path: "前端仓库",
   branch: "分支",
   git_remote: "Git 远程名",
   yunxiao_entry: "云效入口",
@@ -24,6 +25,7 @@ const fieldLabels: Record<string, string> = {
 
 const errorFields: Record<string, string> = {
   repo_path: "repo_path",
+  front_repo_path: "front_repo_path",
   branch: "branch",
   git_remote: "git_remote",
   yunxiao_entry: "yunxiao_entry",
@@ -55,6 +57,7 @@ const tone = ref<"ok" | "bad" | "">("");
 const form = reactive({
   name: "",
   repo_path: "",
+  front_repo_path: "",
   branch: "",
   git_remote: "origin",
   yunxiao_entry: "",
@@ -83,6 +86,7 @@ function lines(value: string): string[] {
 function fill(project: Project) {
   form.name = project.name;
   form.repo_path = project.repo_path;
+  form.front_repo_path = project.front_repo_path || "";
   form.branch = project.branch;
   form.git_remote = project.git_remote || "origin";
   form.yunxiao_entry = project.yunxiao_entry;
@@ -108,6 +112,7 @@ function payload() {
   return {
     name: form.name,
     repo_path: form.repo_path,
+    front_repo_path: form.front_repo_path,
     branch: form.branch,
     git_remote: form.git_remote,
     yunxiao_entry: form.yunxiao_entry,
@@ -347,6 +352,11 @@ onMounted(async () => {
               本地仓库
               <input id="repo-path" v-model="form.repo_path" autocomplete="off" spellcheck="false" :aria-invalid="invalid('repo_path')">
               <small>本机 Git 工作树的路径，不是远程地址。</small>
+            </label>
+            <label class="wide">
+              前端仓库
+              <input id="front-repo-path" v-model="form.front_repo_path" autocomplete="off" spellcheck="false" :aria-invalid="invalid('front_repo_path')">
+              <small>不填就用本地仓库同级的「仓库名-front」。</small>
             </label>
             <label>
               分支

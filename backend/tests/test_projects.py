@@ -69,6 +69,32 @@ def test_put_replaces_whole_record_and_rejects_secrets(client, app, var_dir):
     assert body["id"] == project_id
 
 
+def test_front_repo_is_optional_and_must_contain_src(client, app, tmp_path, monkeypatch):
+    monkeypatch.setenv("YUNXIAO_TOKEN", "secret-token")
+    repo = git_repo(tmp_path / "repo")
+    created = client.post("/api/projects", headers=auth(app), json={})
+    project_id = created.json()["id"]
+    assert created.json()["front_repo_path"] == ""
+    body = complete_body(repo)
+    saved = client.put(f"/api/projects/{project_id}", headers=auth(app), json=body)
+    assert saved.status_code == 200
+    assert saved.json()["front_repo_path"] == ""
+    checked = client.post(f"/api/projects/{project_id}/validate", headers=auth(app)).json()
+    assert "front_repo_path" not in codes(checked)
+
+    front = tmp_path / "custom-front" / "src"
+    front.mkdir(parents=True)
+    body["front_repo_path"] = str(front.parent)
+    client.put(f"/api/projects/{project_id}", headers=auth(app), json=body)
+    ready = client.post(f"/api/projects/{project_id}/validate", headers=auth(app)).json()
+    assert "front_repo_path" not in codes(ready)
+
+    body["front_repo_path"] = str(tmp_path / "missing-front")
+    client.put(f"/api/projects/{project_id}", headers=auth(app), json=body)
+    broken = client.post(f"/api/projects/{project_id}/validate", headers=auth(app)).json()
+    assert "front_repo_path" in codes(broken)
+
+
 def test_center_requires_org_and_host_mismatch_is_an_error(client, app, tmp_path, monkeypatch):
     monkeypatch.setenv("YUNXIAO_TOKEN", "secret-token")
     repo = git_repo(tmp_path / "repo")

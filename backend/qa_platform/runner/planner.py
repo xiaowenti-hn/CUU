@@ -17,41 +17,18 @@ ACTIONS = {"click", "type", "select", "set"}
 CLICK_FIELDS = {"value", "option", "checked"}
 SOURCE_LINE = re.compile(r"^(.+):([0-9]+)$")
 
-SYSTEM_PROMPT = """你是验收方案助手。只根据给出的需求正文、提交号和摘录材料返回一个 JSON 对象。
-顶层字段只能围绕 ui、cases、checks、open、source。
-ui.seed_object_count 是大于等于 0 的整数。
-如果带了需求截图，ui.pages 写一条。title_text 是截图最外层正在打开的那一页的名字，不要写成里面的页签。path 先留空，不要编。
-ui.surfaces 是字符串数组，按截图顺序列出这一页上的页签。没有页签就写空数组。
-每条用例的 start：有页签时写成「外层页面 - 页签名」，没有页签时只写外层页面。不要只写页签。
-图上有的页签，材料里对得上表的各写一条用例，页签名要在 ui.surfaces 里。对不上表的页签不要编用例，在 open 里用这个页签名提问。图上没有的页签，不要因为代码里有控制器就加。
-没有截图时，ui.surfaces 写空数组。start 看不出页面就写空字符串，不要猜。
-如果给出了 menus，页面名能对上唯一一条 menu_name 时，path 原样抄它的 route。对不上或对上多条就留空，不要猜。
-cases 至少一条，id 在文件内唯一，不能把方案收成 count 和 notice。
-每条用例要有 check_id 和 pk_columns。pk_columns 是对应 check 的 pk 的非空子集。
-每个步骤都要有 role、name、locator_status、action、phase。
-locator_status 只能是 ready 或 pending。ready 时 name 不能为空。pending 表示页面还没打开、名字还没对上，可以留下。
-role 只能是 button、link、textbox、checkbox、radio、combobox。
-action 为 type 时要有字符串 value；为 select 时要有 option；为 set 时要有布尔 checked；为 click 时不能带 value、option、checked。
-effect 只能是 read 或 commit，不写则视为 read。phase 只能是 seed 或 test。
-每条用例还要有 goal、start、expect_text。这三样是交给操作页面的人看的说明，不是定位脚本。
-goal 是一句话。查询类写成：把准备的输入填进截图箭头指的条件，做查询，读页面上的结果条数。不要写列表只剩这些输入，也不要写条数等于输入条数。
-start 见上面。没有截图、也看不出页面时写空字符串，不要猜路径。
-expect_text 是字符串数组。每一项是做完后页面上新出现的短文字。不要把这一步要点、要填、要选的控件名写进去。页签名如果就是要点的那个控件，也不要写进去。
-需求截图里的空表、箭头和数字只说明界面长什么样。空表上的 0 是示例数据，不是这次查询的结果。不要把「共 0 条」或「查询完成」写进 expect_text，除非需求正文里原样有这句。
-库里的行是测试输入，方案阶段还没取出，条数也还不知道。不要把输入条数写成期望。
-如果做完后要看的就是查询出来的条数，expect_text 写「结果条数」。不要写具体数字。执行时读取页面上名称正好是「共 N 条」的那一行，N 是多少都算结果，也可以和输入条数不同。
-步骤的 name 必须是人在页面上能看见的控件文字。不要写代码字段名，也不要在名字后面加「输入框」或「列表字段」。
-步骤只是参考顺序：填写、选择、勾选、点击。打开页面后对不上，执行的人会重新看眼前的控件再改。不要为此编 locator、CSS 或测试用例编号。
-checks 至少一条，kind 只能是 table，不能是 api 或 state。不要输出 SQL。
-每条 check 要有唯一 id、table、非空 pk、state_field、source。source 写成材料里的 path:line。
-open 可以是空数组。要人拍板时写 id、question，needs_decision 为 true，decision 必须是空字符串，不要自己做决定。
-state_field 必须是会变化的列，不能写成主键本身。
-checks 只保留用例 check_id 用到的表。checks 用来事后核对数据库，不要把它写成页面上的点击步骤。
-如果给出了 live_tables，checks.table 只能用其中的真实表名。代码里有类、库里没有的表不要写进 checks。
-value 不要编造库里的单号或业务编号，写成「使用库里已有数据」。真正的值由后续从数据库取出，最多 500 条。
-如果给出了 acceptance_criteria，每条标准原样成为一条用例的标题或步骤，不要改写，也不要另加标准里没有的平台或场景。checks 仍只用来核对库里的表。
-source.commits 只能来自给出的提交，不要新编 SHA。source.files 只能来自给出的文件。
-如果用户消息带了需求页截图，截图里的业务图片、箭头和界面文字都要读出来，浏览器书签和标签栏忽略。
+SYSTEM_PROMPT = """你是验收方案助手。读需求正文、截图、材料和 pages，只返回一个 JSON。顶层是 ui、cases、checks、open、source。
+
+截图只说明界面长什么样。最外层页面写入 ui.pages[0].title_text，图上的页签按顺序写入 ui.surfaces，用来认出是哪一页。忽略浏览器书签和标签栏。
+测哪些页签以 pages 为准。和截图页签落在同一条 route 上的行，每一行写一条用例，check 用这一行的 source 和 table。图上没有、但在这条 route 上的页签也要写。
+图上有、pages 里没有同名 tab 的，放进 open，不编用例。别的 route 上的页签不写。
+没有 pages 时，只给图上能在材料里对上表的页签写用例。没有截图时 surfaces 为空，start 为空。
+
+每条用例给执行的人三句话：goal 是要完成的事，start 是「外层页面 - 页签」或只有外层页面，要看条数时 expect_text 写「结果条数」。步骤只写页面上看得见的字，value 写「使用库里已有数据」。
+checks 只为事后查表。live_tables 里有的表名才能写。source 只用消息里给出的提交和文件。
+
+照这个形状填，没有的数组写 []：
+{"ui":{"seed_object_count":0,"pages":[{"title_text":"","path":""}],"surfaces":[]},"cases":[{"id":"","title":"","goal":"","start":"","expect_text":[],"check_id":"","pk_columns":[],"steps":[{"phase":"test","action":"type","role":"textbox","name":"","locator_status":"ready","value":""}]}],"checks":[{"id":"","kind":"table","table":"","pk":[],"state_field":"","source":""}],"open":[],"source":{"commits":[],"files":[]}}
 """
 
 
@@ -143,12 +120,104 @@ def _example_expect(item: str, requirement: str) -> bool:
     return text in _EXAMPLE_WORDS or _EXAMPLE_RESULT.fullmatch(text) is not None
 
 
-_START_SPLIT = re.compile(r"\s*[-—－]\s*")
 _GOAL_BIAS = ("只剩", "仅剩", "条数等于", "等于输入", "和输入一样", "一样多")
 
 
-def _start_parts(start: str) -> list[str]:
-    return [part.strip("「」 ") for part in _START_SPLIT.split(start.strip()) if part.strip("「」 ")]
+def _plain_label(text: str) -> str:
+    """去掉首尾空白和书写用的引号。页签名中间的符号保留。"""
+    return text.strip().replace("「", "").replace("」", "").strip()
+
+
+def _start_parts(start: str, title: str = "", surfaces: list[str] | None = None) -> list[str]:
+    """起点是「外层页面 + 分隔符 + 页签名」两段整句。页签名里的横线不算分隔符。"""
+    text = _plain_label(start)
+    names = [item.strip() for item in (surfaces or []) if isinstance(item, str) and item.strip()]
+    if names:
+        found: list[tuple[str, str]] = []
+        wanted = _plain_label(title) if title else ""
+        for name in names:
+            plain_name = _plain_label(name)
+            if not plain_name:
+                continue
+            match = re.fullmatch(rf"(.+)\s*[-—－]\s*{re.escape(plain_name)}", text)
+            if match is None:
+                continue
+            page = match.group(1).strip()
+            if not page:
+                continue
+            if wanted and page != wanted:
+                continue
+            found.append((title or page, name))
+        if not found:
+            return []
+        found.sort(key=lambda item: len(item[1]), reverse=True)
+        return [found[0][0], found[0][1]]
+    if title and text == _plain_label(title):
+        return [title]
+    return []
+
+
+def _matched_tab(start: str, candidates: list[str]) -> str:
+    """起点末尾整段对上的最长页签名。页签名中间的横线留在页签名里。"""
+    text = _plain_label(start)
+    found: list[str] = []
+    for name in candidates:
+        plain = _plain_label(name)
+        if not plain:
+            continue
+        if text == plain or re.fullmatch(rf"(.+)\s*[-—－]\s*{re.escape(plain)}", text):
+            found.append(name)
+    if not found:
+        return ""
+    found.sort(key=lambda item: len(_plain_label(item)), reverse=True)
+    return found[0]
+
+
+def _fill_plan_defaults(doc) -> None:
+    """主键没写时用检查的主键。步骤有名字却没写状态时视为 ready。"""
+    if not isinstance(doc, dict):
+        return
+    checks = doc.get("checks") if isinstance(doc.get("checks"), list) else []
+    pk_by_id: dict[str, list[str]] = {}
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        check_id = check.get("id")
+        pk = check.get("pk")
+        if isinstance(check_id, str) and isinstance(pk, list) and all(isinstance(item, str) and item for item in pk) and pk:
+            pk_by_id[check_id] = pk
+    cases = doc.get("cases")
+    if not isinstance(cases, list):
+        return
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        columns = case.get("pk_columns")
+        if columns is None or columns == []:
+            pk = pk_by_id.get(case.get("check_id"))
+            if pk:
+                case["pk_columns"] = list(pk)
+        steps = case.get("steps")
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            name = step.get("name")
+            if isinstance(name, str) and name.strip() and step.get("locator_status") in (None, ""):
+                step["locator_status"] = "ready"
+
+
+def _fill_check_kind(checks) -> None:
+    """库检查只有 table 一种合法值。没写时补上，写错的留给校验打回。"""
+    if not isinstance(checks, list):
+        return
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        kind = check.get("kind")
+        if not isinstance(kind, str) or not kind.strip():
+            check["kind"] = "table"
 
 
 def _page_title(ui) -> str:
@@ -162,8 +231,28 @@ def _page_title(ui) -> str:
     return ""
 
 
-def _surface_errors(doc, ui, cases) -> list[str]:
-    """有需求截图时，起点先写外层页面，再写页签。页签和用例或待决定一一对应。"""
+def _scope_tabs(page_index, surfaces: list[str]) -> dict[str, dict]:
+    """截图页签对上的那几条 route，加上这些 route 上的全部索引页签。"""
+    rows = _index_rows(page_index)
+    routes: list[str] = []
+    for name in surfaces:
+        row = rows.get(name)
+        if not row:
+            continue
+        route = str(row.get("route") or "").strip()
+        if route and route not in routes:
+            routes.append(route)
+    if not routes:
+        return {name: rows[name] for name in surfaces if name in rows}
+    return {
+        tab: row
+        for tab, row in rows.items()
+        if str(row.get("route") or "").strip() in routes
+    }
+
+
+def _surface_errors(doc, ui, cases, page_index=None) -> list[str]:
+    """有需求截图时，起点先写外层页面，再写页签。页签名来自这一页的代码或截图。"""
     errors = []
     title = _page_title(ui)
     if not title:
@@ -181,38 +270,157 @@ def _surface_errors(doc, ui, cases) -> list[str]:
         if isinstance(item, dict)
     ]
     open_text = "\n".join(opens)
+    scope = _scope_tabs(page_index, names)
+    indexed = list(_index_rows(page_index))
+    known = list(dict.fromkeys([*names, *scope, *indexed]))
     used: list[str] = []
     for case in cases:
         if not isinstance(case, dict):
             continue
         label = case.get("id") if isinstance(case.get("id"), str) and case.get("id") else "未命名"
         start = case.get("start") if isinstance(case.get("start"), str) else ""
-        parts = _start_parts(start)
-        if names:
-            if len(parts) != 2 or (title and parts[0] != title) or parts[1] not in names:
+        parts = _start_parts(start, title, known)
+        if names or scope:
+            if len(parts) == 2 and (parts[1] in names or parts[1] in scope):
+                used.append(parts[1])
+            elif len(parts) == 2 and parts[1] in indexed:
+                continue
+            else:
                 shown = title or "外层页面"
                 errors.append(
                     f"用例「{label}」的 start 要写成「{shown} - 页签名」。"
-                    "页签名必须在 ui.surfaces 里。不要只写页签。"
+                    "页签名整段照抄这一页代码或截图里的名字。不要只写页签。"
                 )
-            else:
-                used.append(parts[1])
         elif parts != [title]:
             errors.append(f"用例「{label}」的 start 只写外层页面「{title}」。截图上没有页签。")
     if len(used) != len(set(used)):
         errors.append("同一个页签不要写两条用例。")
     for name in names:
-        if name in used or name in open_text:
+        if name in used or name in open_text or name in scope:
             continue
-        errors.append(f"页签「{name}」没有用例。材料里对不上表时，在 open 里用这个页签名提问，不要编用例。")
+        errors.append(f"页签「{name}」代码里没有同名页，放进 open，不要编用例。")
+    return errors
+
+
+def _same_table(written: str, wanted: str) -> bool:
+    if not written or not wanted:
+        return False
+    if written == wanted:
+        return True
+    return wanted.endswith("_" + written) or written.endswith("_" + wanted)
+
+
+def _mentions_tab(tab: str, questions: list[str]) -> bool:
+    if not tab:
+        return False
+    pattern = re.compile(rf"(?<![\w\u4e00-\u9fff]){re.escape(tab)}(?![\w\u4e00-\u9fff])")
+    return any(pattern.search(text) for text in questions)
+
+
+def _index_rows(page_index) -> dict[str, dict]:
+    if not isinstance(page_index, list) or not page_index:
+        return {}
+    grouped: dict[str, list[dict]] = {}
+    for row in page_index:
+        if not isinstance(row, dict):
+            continue
+        tab = str(row.get("tab") or "").strip()
+        source = str(row.get("source") or "")
+        path = source.split(":", 1)[0].strip()
+        table = str(row.get("table") or "").strip()
+        if not tab or not path or not table:
+            continue
+        grouped.setdefault(tab, []).append(row)
+    clean = {}
+    for tab, rows in grouped.items():
+        paths = {str(row.get("source") or "").split(":", 1)[0] for row in rows}
+        tables = {str(row.get("table") or "") for row in rows}
+        if len(paths) == 1 and len(tables) == 1:
+            clean[tab] = rows[0]
+    return clean
+
+
+def _index_paths(page_index) -> set[str]:
+    found = set()
+    if not isinstance(page_index, list):
+        return found
+    for row in page_index:
+        if not isinstance(row, dict):
+            continue
+        path = str(row.get("source") or "").split(":", 1)[0].strip()
+        if path:
+            found.add(path)
+    return found
+
+
+def _binding_errors(doc, ui, cases, check_by_id, page_index) -> list[str]:
+    """这一页代码里的页签必须绑到自己的控制器。别的页面上的页签不写用例。"""
+    rows = _index_rows(page_index)
+    if not rows:
+        return []
+    errors = []
+    surfaces = ui.get("surfaces") if isinstance(ui, dict) else None
+    names = [item.strip() for item in surfaces if isinstance(item, str) and item.strip()] if isinstance(surfaces, list) else []
+    scope = _scope_tabs(page_index, names)
+    questions = [
+        str(item.get("question") or "")
+        for item in (doc.get("open") or [])
+        if isinstance(item, dict)
+    ]
+    known = list(dict.fromkeys([*names, *rows]))
+    used: set[str] = set()
+    title = _page_title(ui)
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        label = case.get("id") if isinstance(case.get("id"), str) and case.get("id") else "未命名"
+        parts = _start_parts(
+            case.get("start") if isinstance(case.get("start"), str) else "",
+            title,
+            known,
+        )
+        if len(parts) != 2:
+            continue
+        tab = parts[1]
+        if tab in scope:
+            used.add(tab)
+            row = scope[tab]
+            want_path = str(row.get("source") or "").split(":", 1)[0]
+            want_name = str(row.get("class_name") or want_path)
+            want_table = str(row.get("table") or "")
+            check = check_by_id.get(case.get("check_id"))
+            if isinstance(check, dict):
+                got_path = str(check.get("source") or "").split(":", 1)[0]
+                got_table = str(check.get("table") or "")
+                if got_path != want_path:
+                    errors.append(f"用例「{label}」的页签「{tab}」对应 {want_name}，检查写成了 {got_path or '空'}。")
+                if not _same_table(got_table, want_table):
+                    errors.append(f"用例「{label}」的页签「{tab}」对应表 {want_table}，检查写成了 {got_table or '空'}。")
+            if _mentions_tab(tab, questions):
+                errors.append(f"页签「{tab}」已经有用例，不要再写进 open。")
+        elif tab in names:
+            errors.append(f"页签「{tab}」对不上页签索引。不要编用例，在 open 里用这个页签名提问。")
+        elif tab in rows:
+            errors.append(
+                f"用例「{label}」的页签「{tab}」不在这一页的代码里。"
+                "删掉这条用例和只被它使用的库检查。"
+            )
+    for name, row in scope.items():
+        if name in used:
+            continue
+        table = str(row.get("table") or "")
+        errors.append(f"页签「{name}」在这一页的代码里有表 {table}，要写成用例，不要只写进 open。")
     return errors
 
 
 def validate_plan(doc, *, allowed_commits=None, material_files=None,
-                  allowed_databases=None, requirement: str = "", has_images: bool = False) -> list[str]:
+                  allowed_databases=None, requirement: str = "", has_images: bool = False,
+                  page_index=None) -> list[str]:
     errors: list[str] = []
     if not isinstance(doc, dict):
         return ["方案必须是 JSON 对象"]
+    _fill_plan_defaults(doc)
+    index_paths = _index_paths(page_index)
     for key in ("ui", "cases", "checks", "open", "source"):
         if key not in doc:
             errors.append(f"缺少 {key}")
@@ -235,7 +443,10 @@ def validate_plan(doc, *, allowed_commits=None, material_files=None,
         errors.append("cases 至少一条")
         cases = []
     if has_images:
-        errors.extend(_surface_errors(doc, ui if isinstance(ui, dict) else {}, cases))
+        errors.extend(_surface_errors(
+            doc, ui if isinstance(ui, dict) else {}, cases, page_index,
+        ))
+    _fill_check_kind(checks)
     case_ids = [item.get("id") for item in cases if isinstance(item, dict)]
     if case_ids and set(case_ids) <= {"count", "notice"}:
         errors.append("演示方案不能只有 count 和 notice")
@@ -273,7 +484,7 @@ def validate_plan(doc, *, allowed_commits=None, material_files=None,
         match = SOURCE_LINE.fullmatch(source) if isinstance(source, str) else None
         if not match:
             errors.append("checks.source 必须是 path:line")
-        elif material_files is not None and match.group(1) not in material_files:
+        elif material_files is not None and match.group(1) not in material_files and match.group(1) not in index_paths:
             errors.append("checks.source 的路径不在本次材料里")
         if "database" in check and check.get("database") not in (allowed_databases or []):
             errors.append("checks.database 不在允许的库名单里")
@@ -380,6 +591,9 @@ def validate_plan(doc, *, allowed_commits=None, material_files=None,
         commits = []
     if allowed_commits is not None and any(item not in allowed_commits for item in commits):
         errors.append("source.commits 多出本次提交")
+    errors.extend(_binding_errors(
+        doc, ui if isinstance(ui, dict) else {}, cases, check_by_id, page_index,
+    ))
     return errors
 
 
@@ -454,8 +668,20 @@ def _requirement_images(run_dir) -> list[str]:
     return found
 
 
+def _public_page(row: dict) -> dict:
+    return {
+        "tab": row.get("tab") or "",
+        "route": row.get("route") or "",
+        "mapping": row.get("mapping") or "",
+        "class_name": row.get("class_name") or "",
+        "table": row.get("table") or "",
+        "source": row.get("source") or "",
+        "filters": [item for item in (row.get("filters") or []) if isinstance(item, str)],
+    }
+
+
 def propose(run_dir, *, key: str, shas: list[str], files: list[str], materials: str,
-            complete=None, live_tables=None, menus=None) -> int:
+            complete=None, live_tables=None, menus=None, pages=None) -> int:
     state = read_state(run_dir)
     serial, body = _requirement_text(run_dir, state)
     model = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
@@ -471,6 +697,8 @@ def propose(run_dir, *, key: str, shas: list[str], files: list[str], materials: 
         message["live_tables"] = live_tables
     if menus:
         message["menus"] = menus
+    if pages:
+        message["pages"] = [_public_page(row) for row in pages if isinstance(row, dict)]
     criteria = acceptance_criteria(body)
     if criteria:
         message["acceptance_criteria"] = criteria
@@ -518,6 +746,7 @@ def propose(run_dir, *, key: str, shas: list[str], files: list[str], materials: 
             allowed_databases=list(state.get("allowed_databases") or []),
             requirement=body,
             has_images=bool(images),
+            page_index=pages,
         )
         errors.extend(criteria_gaps(doc, criteria))
         return doc, errors
@@ -582,10 +811,15 @@ def propose(run_dir, *, key: str, shas: list[str], files: list[str], materials: 
         "files": list(files),
     }
     from qa_platform.runner.menu_page import attach_page
+    from qa_platform.runner.page_index import fill_route
 
     chosen = attach_page(doc, body, menus or [])
     if chosen:
         note(run_dir, step="方案", basis=f"方案没有页面路径，已按菜单「{chosen['name']}」补上 {chosen['path']}")
+    else:
+        route = fill_route(doc, pages or [])
+        if route:
+            note(run_dir, step="方案", basis=f"方案没有页面路径，已按前端路由补上 {route}")
     write_json(run_dir / "plan.json", doc)
     fresh = read_state(run_dir)
     fresh["stage"] = "plan"
