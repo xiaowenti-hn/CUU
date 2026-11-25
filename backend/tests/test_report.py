@@ -417,6 +417,12 @@ def test_page_count_is_the_result_and_example_zero_is_not():
         "AXTextField 名称「A-1」 可以填写",
     ])
     assert judge_final(case, seen, ["A-1", "A-2"]) == ("passed", "")
+    assert judge_final(case, seen, ["A-1", "A-2"], prior_count="共 0 条") == ("passed", "")
+    stale = "AXStaticText 名称「共 0 条」"
+    assert judge_final(case, stale, ["A-1", "A-2"], prior_count="共 0 条") == (
+        "wait",
+        "结果条数还是点查询之前的「共 0 条」。等它变掉再结束。",
+    )
     assert judge_final(case, "AXGroup 名称「SQL Server 共 条 的标签」", ["A-1", "A-2"]) == (
         "wait",
         "页面上还没有出现结果条数",

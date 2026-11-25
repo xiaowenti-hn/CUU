@@ -25,7 +25,9 @@ SYSTEM_PROMPT = """你是验收方案助手。读需求正文、截图、材料�
 没有 pages 时，只给图上能在材料里对上表的页签写用例。没有截图时 surfaces 为空，start 为空。
 
 每条用例给执行的人三句话：goal 是要完成的事，start 是「外层页面 - 页签」或只有外层页面，要看条数时 expect_text 写「结果条数」。步骤只写页面上看得见的字，value 写「使用库里已有数据」。
-checks 只为事后查表。live_tables 里有的表名才能写。source 只用消息里给出的提交和文件。
+checks 只为事后查表。table 必须使用 live_tables 中的真实表名。pk 和 state_field 必须是该表 columns 中真实存在的列名；state_field 只能写一个列标识符，不能写中文、说明或路径。source 必须是 path:line，不能带提交哈希。页签能对应 pages 时，直接照抄该行的 source 和 table；否则 source 必须引用本次 files/materials 中能证明表或字段的源码行。提交哈希只写在顶层 source.commits。
+
+正确格式示例："state_field":"status","source":"bfrs-app/src/main/java/com/greatonce/bfrs/controller/AlipayBillController.java:42"。示例行号仅说明格式，必须使用 pages 或源码中实际给出的行号。不要把类似 "ae5accb5 <path>" 的提交号前缀写进 checks.source。
 
 照这个形状填，没有的数组写 []：
 {"ui":{"seed_object_count":0,"pages":[{"title_text":"","path":""}],"surfaces":[]},"cases":[{"id":"","title":"","goal":"","start":"","expect_text":[],"check_id":"","pk_columns":[],"steps":[{"phase":"test","action":"type","role":"textbox","name":"","locator_status":"ready","value":""}]}],"checks":[{"id":"","kind":"table","table":"","pk":[],"state_field":"","source":""}],"open":[],"source":{"commits":[],"files":[]}}
@@ -353,6 +355,47 @@ def _index_paths(page_index) -> set[str]:
     return found
 
 
+def _canonicalize_indexed_checks(doc, page_index) -> None:
+    """页签索引是控制器和表的权威绑定；据此修正模型拼错的来源路径。"""
+    if not isinstance(doc, dict) or not isinstance(page_index, list):
+        return
+    cases = doc.get("cases")
+    if not isinstance(cases, list):
+        return
+    ui = doc.get("ui") if isinstance(doc.get("ui"), dict) else {}
+    surfaces = ui.get("surfaces") if isinstance(ui.get("surfaces"), list) else []
+    names = [item.strip() for item in surfaces if isinstance(item, str) and item.strip()]
+    rows = _scope_tabs(page_index, names)
+    if not rows:
+        return
+    title = _page_title(ui)
+    known = list(dict.fromkeys([*names, *_index_rows(page_index)]))
+    checks = doc.get("checks") if isinstance(doc.get("checks"), list) else []
+    check_by_id = {
+        check.get("id"): check for check in checks
+        if isinstance(check, dict) and isinstance(check.get("id"), str)
+    }
+    targets: dict[str, set[tuple[str, str]]] = {}
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        parts = _start_parts(str(case.get("start") or ""), title, known)
+        if len(parts) != 2 or parts[1] not in rows:
+            continue
+        check_id = case.get("check_id")
+        if not isinstance(check_id, str) or check_id not in check_by_id:
+            continue
+        row = rows[parts[1]]
+        targets.setdefault(check_id, set()).add((str(row.get("source") or ""), str(row.get("table") or "")))
+    for check_id, bindings in targets.items():
+        if len(bindings) != 1:
+            continue
+        source, table = next(iter(bindings))
+        if source and table:
+            check_by_id[check_id]["source"] = source
+            check_by_id[check_id]["table"] = table
+
+
 def _binding_errors(doc, ui, cases, check_by_id, page_index) -> list[str]:
     """这一页代码里的页签必须绑到自己的控制器。别的页面上的页签不写用例。"""
     rows = _index_rows(page_index)
@@ -415,7 +458,7 @@ def _binding_errors(doc, ui, cases, check_by_id, page_index) -> list[str]:
 
 def validate_plan(doc, *, allowed_commits=None, material_files=None,
                   allowed_databases=None, requirement: str = "", has_images: bool = False,
-                  page_index=None) -> list[str]:
+                  page_index=None, table_columns=None) -> list[str]:
     errors: list[str] = []
     if not isinstance(doc, dict):
         return ["方案必须是 JSON 对象"]
@@ -480,6 +523,16 @@ def validate_plan(doc, *, allowed_commits=None, material_files=None,
             errors.append("checks.pk 必须是非空列名数组")
         if not isinstance(check.get("state_field"), str) or IDENT.fullmatch(str(check.get("state_field"))) is None:
             errors.append("checks.state_field 必须是标识符")
+        table_name = check.get("table") if isinstance(check.get("table"), str) else ""
+        known_columns = (table_columns or {}).get(table_name)
+        if isinstance(known_columns, set):
+            known_columns = list(known_columns)
+        if isinstance(known_columns, (list, tuple)) and known_columns:
+            if isinstance(pk, list) and any(column not in known_columns for column in pk):
+                errors.append(f"checks「{check_id or '未命名'}」的 pk 必须来自表 {check.get('table')} 的真实列名")
+            state_field = check.get("state_field")
+            if isinstance(state_field, str) and IDENT.fullmatch(state_field) and state_field not in known_columns:
+                errors.append(f"checks「{check_id or '未命名'}」的 state_field 不在表 {check.get('table')} 的真实列名中")
         source = check.get("source")
         match = SOURCE_LINE.fullmatch(source) if isinstance(source, str) else None
         if not match:
@@ -739,6 +792,16 @@ def propose(run_dir, *, key: str, shas: list[str], files: list[str], materials: 
             doc = _parse_plan(result)
         except (KeyError, IndexError, TypeError, json.JSONDecodeError):
             return None, None
+        _canonicalize_indexed_checks(doc, pages)
+        table_columns = {
+            str(table.get("table")): [
+                str(column.get("name")) for column in table.get("columns", [])
+                if isinstance(column, dict) and column.get("name")
+            ]
+            for table in (live_tables or [])
+            if isinstance(table, dict) and table.get("table")
+            and isinstance(table.get("columns"), list)
+        }
         errors = validate_plan(
             doc,
             allowed_commits=set(shas),
@@ -747,6 +810,7 @@ def propose(run_dir, *, key: str, shas: list[str], files: list[str], materials: 
             requirement=body,
             has_images=bool(images),
             page_index=pages,
+            table_columns=table_columns,
         )
         errors.extend(criteria_gaps(doc, criteria))
         return doc, errors

@@ -59,6 +59,9 @@ const latest = computed(() => {
   const events = run.value?.events ?? [];
   return events.length ? events[events.length - 1] : null;
 });
+const progressEvents = computed(() => (run.value?.events ?? []).filter((event) =>
+  !(event.basis.startsWith("看到「") && event.basis.includes("页面上没有找到"))
+));
 const progressEl = ref<HTMLElement | null>(null);
 const stickToLatest = ref(true);
 const reportOpen = ref(false);
@@ -818,12 +821,12 @@ onUnmounted(() => {
         </article>
         <div ref="progressEl" class="run-progress" @scroll="onProgressScroll">
           <h2>进度</h2>
-          <p v-if="!run.events.length" class="hint">还没有进度。</p>
+          <p v-if="!progressEvents.length" class="hint">还没有进度。</p>
           <ol v-else class="events">
             <li
-              v-for="(event, index) in run.events"
+              v-for="(event, index) in progressEvents"
               :key="`${event.time}-${index}`"
-              :class="[eventTone(event.basis), { current: run.status === 'running' && index === run.events.length - 1 }]"
+              :class="[eventTone(event.basis), { current: run.status === 'running' && index === progressEvents.length - 1 }]"
             >
               <time>{{ event.time }}</time>
               <strong>{{ eventLabel(event) }}</strong>

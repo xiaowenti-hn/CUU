@@ -18,6 +18,7 @@ MISSING_LOG = "日志无相关记录"
 OBSERVATION_MISS = "观察不符"
 WEAK_EXPECT = "通过条件只写了要操作的控件"
 NO_DATA = "这一条没有库里的数据"
+UNQUERIED = "这一条基线没有查出可填的值"
 CONTROL_ACTIONS = {"click", "type", "select", "set"}
 DEMO_NAMES = {"db-before.json", "db-after-1.json", "db-after-2.json", "sql-result.json"}
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -263,8 +264,18 @@ def data_is_empty(case: dict, baseline: dict | None) -> bool:
     return isinstance(real, list) and not prepared_values(case, baseline)
 
 
-def judge_final(case: dict, seen: str, prepared: list[str] | None, *, data_empty: bool = False) -> tuple[str, str]:
-    """返回 passed、failed 或 wait，以及要写进进度的原因。wait 表示先不要结束。"""
+def judge_final(
+    case: dict,
+    seen: str,
+    prepared: list[str] | None,
+    *,
+    data_empty: bool = False,
+    prior_count: str = "",
+) -> tuple[str, str]:
+    """返回 passed、failed 或 wait，以及要写进进度的原因。wait 表示先不要结束。
+
+    prior_count 是点查询之前页面上的「共 N 条」。还停在这个数字上就先不要通过。
+    """
     filled = filled_values(case)
     if data_empty and filled:
         return "failed", NO_DATA
@@ -285,6 +296,9 @@ def judge_final(case: dict, seen: str, prepared: list[str] | None, *, data_empty
     if by_count:
         if not count:
             return "wait", "页面上还没有出现结果条数"
+        previous = prior_count.strip()
+        if previous and count == previous:
+            return "wait", f"结果条数还是点查询之前的「{count}」。等它变掉再结束。"
         if len(own) > 1:
             return "passed", ""
     missing_values = [item for item in own if not outside_entry(seen, item)]

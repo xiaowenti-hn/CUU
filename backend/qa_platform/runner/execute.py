@@ -891,8 +891,6 @@ def _useful_page(rows: list[str]) -> str:
     if counts:
         body.append("页面结果：")
         body.extend(counts[:4])
-    if not entries:
-        body.append("这份页面里没有看到输入框。用控件上的文字再看一次，不要连续看整页。")
     return "\n".join(body)[:1800]
 
 
@@ -1156,7 +1154,7 @@ def _plan_brief(case: dict, plan: dict, phase: str, typed: str, repo: str = "", 
     if counted:
         lines.append("查询结果看页面上名称正好是「共 N 条」的那一行。准备的值是测试输入，条数可以和这个 N 不同。")
         lines.append("空表上的 0 和「查询完成」是示例，不要拿来和页面结果对比。")
-    lines.extend(_data_lines(typed, bool(case.get("data_empty"))))
+    lines.extend(_data_lines(typed, bool(case.get("data_empty")), bool(case.get("data_unqueried"))))
     source = ""
     for check in plan.get("checks") or []:
         if isinstance(check, dict) and check.get("id") == case.get("check_id"):
@@ -1444,9 +1442,11 @@ def _split_values(typed: str) -> list[str]:
     return [part.strip() for part in str(typed or "").split(",") if part.strip()]
 
 
-def _data_lines(typed: str, empty: bool) -> list[str]:
+def _data_lines(typed: str, empty: bool, unqueried: bool = False) -> list[str]:
     if empty:
-        return ["这一条库里没有数据，不要用别的用例的单号。"]
+        return ["这一条库里没有数据。不要填写，也不要查询。"]
+    if unqueried:
+        return ["这一条基线没有查出可填的值。不要编一个值去填，也不要查询。"]
     values = _split_values(typed)
     if not values:
         return []
@@ -1491,6 +1491,113 @@ def _probe_text(session, app: str, text: str) -> str:
         return _page_lines(query(app, text, ""), text)
     except (OSError, OcuError, TypeError):
         return ""
+
+
+def _query_click_names(case: dict, phase: str) -> set[str]:
+    """填写之后要点的控件。点它才算提交这次查询。"""
+    names: set[str] = set()
+    saw_type = False
+    for step in case.get("steps") or []:
+        if not isinstance(step, dict) or step.get("phase", "test") != phase:
+            continue
+        action = str(step.get("action") or "")
+        name = str(step.get("name") or "").strip()
+        if action == "type" and name:
+            saw_type = True
+        elif saw_type and action == "click" and name:
+            names.add(name)
+    return names
+
+
+def _case_types(case: dict, phase: str) -> bool:
+    return any(
+        isinstance(step, dict)
+        and step.get("phase", "test") == phase
+        and step.get("action") == "type"
+        and str(step.get("name") or "").strip()
+        for step in case.get("steps") or []
+    )
+
+
+_COUNT_WAIT_S = 32.0
+_COUNT_POLL_S = 0.4
+_LOADING_WORDS = ("加载中", "正在查询")
+
+
+def _count_wait_seconds(session) -> float:
+    """真实窗口才等结果条数变化。测试替身没有 native，不等。"""
+    custom = getattr(session, "count_wait", None)
+    if isinstance(custom, (int, float)) and not isinstance(custom, bool):
+        return max(0.0, float(custom))
+    if getattr(session, "native", None) is None:
+        return 0.0
+    return _COUNT_WAIT_S
+
+
+def _count_poll_seconds(session) -> float:
+    wait = _count_wait_seconds(session)
+    if wait <= 0:
+        return 0.0
+    if wait < _COUNT_WAIT_S:
+        return min(0.05, wait / 4)
+    return _COUNT_POLL_S
+
+
+def _stop_marker(run_dir: Path) -> bool:
+    marker = run_dir / "stop.requested"
+    return marker.is_file() and not marker.is_symlink()
+
+
+def _page_loading(session, app: str) -> bool:
+    query = getattr(session, "query", None)
+    if not callable(query):
+        return False
+    for word in _LOADING_WORDS:
+        try:
+            found = query(app, word, "")
+        except (OSError, OcuError, TypeError):
+            continue
+        for item in _matches(found):
+            label = _control_label(item)
+            if word in label and not _is_entry(str(item.get("role") or "")):
+                return True
+    return False
+
+
+def _count_is_new(text: str, before: str, loading: bool, saw_loading: bool) -> bool:
+    from qa_platform.runner.report import page_result_count
+
+    current = page_result_count(text)
+    if not current or loading:
+        return False
+    if before and current != before:
+        return True
+    return saw_loading
+
+
+def _wait_for_count(session, app: str, before: str, run_dir: Path) -> tuple[str, bool]:
+    """点查询之后，等到「共 N 条」变成另一个数字，或加载出现后又消失。"""
+    from qa_platform.runner.report import page_result_count
+
+    latest = _probe_count(session, app)
+    if _count_is_new(latest, before, _page_loading(session, app), False):
+        return latest, True
+    note(run_dir, step="执行", basis="查询已点下去，正在等结果条数变化")
+    deadline = time.monotonic() + _count_wait_seconds(session)
+    pause = _count_poll_seconds(session)
+    saw_loading = False
+    while time.monotonic() < deadline:
+        if _stop_marker(run_dir):
+            return latest, False
+        if pause:
+            time.sleep(pause)
+        loading = _page_loading(session, app)
+        saw_loading = saw_loading or loading
+        latest = _probe_count(session, app)
+        if _count_is_new(latest, before, loading, saw_loading):
+            return latest, True
+    current = page_result_count(latest)
+    return latest, bool(current and before and current != before)
 
 
 def _probe_count(session, app: str) -> str:
@@ -1893,10 +2000,14 @@ def _close_case(run_dir, state, case, session, app: str, page: str, history: lis
     _write_case(run_dir, case)
 
 
-def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: str, typed: str, *, ask=None, empty_data: bool = False) -> int:
+def _think_and_act(
+    run_dir, state, case, plan, session, model, phase: str, app: str, typed: str,
+    *, ask=None, empty_data: bool = False, unqueried: bool = False,
+) -> int:
     repo = str(state.get("repo_path") or "")
     base_url = str(state.get("base_url") or "")
     case["data_empty"] = empty_data
+    case["data_unqueried"] = unqueried
     from qa_platform.runner.baseline import _requirement_text
     from qa_platform.runner.planner import case_goal
     brief = _plan_brief(
@@ -1921,11 +2032,21 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
     last_action = ""
     tried_clicks: set[tuple[str, str]] = set()
     fill_names, click_names, select_names = _step_targets(case, phase)
-    from qa_platform.runner.report import expects_result_count, page_result_count
+    from qa_platform.runner.report import expects_result_count, filled_values, page_result_count
 
     wants_count = expects_result_count(case, phase)
     count_line = ""
+    query_names = _query_click_names(case, phase)
+    count_pending = False
+    query_settled = False
+    query_before = ""
     note(run_dir, step="执行", basis=f"正在对照测试方案和项目代码，操作「{app}」里的 {case.get('id') or ''}")
+    if (empty_data or unqueried) and _case_types(case, phase):
+        from qa_platform.runner.report import NO_DATA, UNQUERIED
+
+        reason = NO_DATA if empty_data else UNQUERIED
+        _skip_case(run_dir, state, case, session, app, reason, base_url)
+        return 0
     ask = ask or _ask_to_continue
     closed = False
 
@@ -1967,6 +2088,15 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
             seen_now = _observe_page(session, app, fill_names, click_names, select_names, tab_names=names)
             if seen_now:
                 page = seen_now
+            if wants_count and count_pending and _count_wait_seconds(session) > 0:
+                fresh = _probe_count(session, app)
+                current = page_result_count(fresh)
+                if current and query_before and current != query_before:
+                    count_pending = False
+                    query_settled = True
+                    count_line = fresh
+                elif fresh:
+                    count_line = fresh
             if wants_count and count_line and not page_result_count(page):
                 page = f"{page}\n{count_line}" if page else count_line
             shell = _product_shell(page)
@@ -1989,7 +2119,9 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
                 last_action = history[-1][:180]
             situation = _situation(goal, facts, url, previous_url, last_action, target)
             count = page_result_count(page) if wants_count else ""
-            if count:
+            if wants_count and count_pending and query_before:
+                situation += f"\n页面上还是点查询之前的「{query_before}」。等这一行变成这次查询的结果再结束。"
+            elif wants_count and count and (query_settled or not query_names):
                 situation += f"\n页面结果：{count}。这是查询后的条数，和输入条数不同也算结果。"
             prompt = _agent_prompt(brief, repo, page, history, situation)
             if url:
@@ -2015,11 +2147,32 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
                     history.append("还没有在页面上填写或点击，不能结束")
                     note(run_dir, step="执行", basis=history[-1])
                     continue
+                if wants_count and query_names and not query_settled:
+                    if count_pending and _count_wait_seconds(session) > 0:
+                        fresh = _probe_count(session, app)
+                        current = page_result_count(fresh)
+                        if current and query_before and current != query_before:
+                            count_pending = False
+                            query_settled = True
+                            count_line = fresh
+                            if current not in (page or ""):
+                                page = f"{page}\n{fresh}" if page else fresh
+                    if not query_settled:
+                        if count_pending and query_before:
+                            pending = f"结果条数还是点查询之前的「{query_before}」。等它变掉再结束。"
+                        else:
+                            pending = "还没有看到这次查询的结果。等页面上的「共 N 条」变化后再结束。"
+                        history.append(pending)
+                        note(run_dir, step="执行", basis=history[-1])
+                        continue
                 from qa_platform.runner.report import judge_final
                 checked = _page_for_result(session, app, page, case, phase, typed)
                 page = checked or page
                 prepared = [] if empty_data else (_split_values(typed) or None)
-                outcome, reason = judge_final(case, checked, prepared, data_empty=empty_data)
+                prior = query_before if wants_count and query_before and not query_settled else ""
+                outcome, reason = judge_final(
+                    case, checked, prepared, data_empty=empty_data, prior_count=prior,
+                )
                 if outcome == "wait":
                     history.append(reason)
                     note(run_dir, step="执行", basis=history[-1])
@@ -2072,6 +2225,7 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
                 history.append("按键没有给出 key")
                 note(run_dir, step="执行", basis=history[-1])
                 continue
+            quiet_look = False
             try:
                 if action == "look" and not text:
                     page = _see_page(session, app) or page or "还没有整页内容"
@@ -2086,6 +2240,7 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
                         _mark_surface(run_dir, state, target)
                     page, count_line = _with_count(session, app, page, wants_count) if wants_count else (page, count_line)
                     history.append(f"看到「{text}」：{page[:240]}")
+                    quiet_look = page.startswith("页面上没有找到")
                 elif action == "click":
                     if _is_chrome_control(text):
                         history.append("不要点浏览器标签页和地址栏。")
@@ -2113,6 +2268,13 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
                     if manual_stop(run_dir):
                         return leave(2)
                     note(run_dir, step="执行", basis=f"准备点击「{text}」")
+                    wait_for_result = bool(
+                        wants_count and text in query_names and filled_values(case) and _count_wait_seconds(session) > 0
+                    )
+                    if wait_for_result:
+                        query_before = page_result_count(count_line) or page_result_count(page)
+                        if not query_before:
+                            query_before = page_result_count(_probe_count(session, app))
                     before = _window_url(page)
                     if pressed is None:
                         session.click(app, index)
@@ -2134,7 +2296,25 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
                     landed = "" if on_control else "点的是文字，已按它的位置点下去。看它有没有被选中。"
                     last_action = f"点击「{text}」。{stay}".strip()
                     page = _exact_seen(session.query(app, text, ""), text)
-                    page, count_line = _with_count(session, app, page, wants_count) if wants_count else (page, count_line)
+                    if wait_for_result:
+                        found, changed = _wait_for_count(session, app, query_before, run_dir)
+                        if _stop_marker(run_dir) and manual_stop(run_dir):
+                            return leave(2)
+                        if found:
+                            count_line = found
+                            fresh_count = page_result_count(found)
+                            if fresh_count and fresh_count not in page:
+                                page = f"{page}\n{found}" if page else found
+                        count_pending = not changed
+                        query_settled = changed
+                    else:
+                        page, count_line = _with_count(session, app, page, wants_count) if wants_count else (page, count_line)
+                        if wants_count and text in query_names and filled_values(case):
+                            query_before = ""
+                            count_pending = False
+                            query_settled = True
+                        elif wants_count and not query_names and page_result_count(count_line or page):
+                            query_settled = True
                     history.append(f"已点击「{text}」。{stay}{landed}点完看到：{page[:240]}")
                 elif action == "select":
                     option = str(decision.get("option") or "").strip()
@@ -2267,7 +2447,8 @@ def _think_and_act(run_dir, state, case, plan, session, model, phase: str, app: 
             except (OSError, OcuError):
                 record(run_dir, exit_code=2, event_status="阻塞", basis="按方案操作页面失败", step="执行")
                 return leave(2)
-            note(run_dir, step="执行", basis=history[-1][:240])
+            if not quiet_look:
+                note(run_dir, step="执行", basis=history[-1][:240])
         if ask(run_dir) != "continue":
             return leave(2)
 
@@ -2282,11 +2463,14 @@ def _run_case(run_dir, state, case, later, plan, base_url, session, model, query
     ]
     if plan_steps and model is not None and hasattr(session, "query") and hasattr(session, "click") and hasattr(session, "set_value"):
         saved = (_load_json(run_dir / "baseline.json") or {}).get("test_values") or {}
-        real = saved.get(case.get("check_id")) if isinstance(saved, dict) else None
+        check_id = case.get("check_id")
+        real = saved.get(check_id) if isinstance(saved, dict) else None
         empty_data = isinstance(real, list) and not real
+        unqueried = isinstance(saved, dict) and bool(saved) and bool(check_id) and check_id not in saved
         typed = ",".join(str(item) for item in real) if isinstance(real, list) and real else ""
         return _think_and_act(
-            run_dir, state, case, plan, session, model, phase, app, typed, empty_data=empty_data,
+            run_dir, state, case, plan, session, model, phase, app, typed,
+            empty_data=empty_data, unqueried=unqueried,
         )
     note(run_dir, step="执行", basis=f"正在让模型按方案在「{app}」里操作 {case.get('id') or ''}")
     session.reset()

@@ -1003,6 +1003,178 @@ def test_done_accepts_the_page_count_when_expect_is_the_example_zero(tmp_path):
     assert "写入：2 条：A-1、A-2" in report
 
 
+def test_query_count_waits_until_the_number_changes(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    case = {
+        "id": "C1",
+        "title": "按条件查询",
+        "check_id": "K1",
+        "status": "running",
+        "expect_text": ["查询完成", "共 0 条"],
+        "steps": [
+            {"phase": "test", "action": "type", "role": "textbox", "name": "条件"},
+            {"phase": "test", "action": "click", "role": "button", "name": "搜索"},
+        ],
+    }
+    prompts = []
+
+    class Hand:
+        native = object()
+        count_wait = 0.5
+        reads = 0
+
+        def query(self, app, text, role=""):
+            if text == "共":
+                self.reads += 1
+                label = "共 0 条" if self.reads < 3 else "共 9 条"
+                matches = [{"element_index": 2, "role": "AXStaticText", "text": label}]
+            elif text == "条件":
+                matches = [{"element_index": 4, "role": "AXTextField", "text": "条件"}]
+            elif text == "搜索":
+                matches = [{"element_index": 5, "role": "AXButton", "text": "搜索"}]
+            else:
+                matches = [{"element_index": 3, "role": "AXTextField", "text": text}]
+            return {"content": [{"type": "text", "text": json.dumps({"matches": matches})}]}
+
+        def get_app_state(self, app, include_screenshot=False):
+            return {"content": [{"type": "text", "text": "页面"}]}
+
+        def click(self, app, index):
+            return {}
+
+        def set_value(self, app, index, value):
+            return {}
+
+    def model(prompt):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return {"think": "填入准备的值", "action": "type", "text": "条件", "value": "A-1,A-2"}
+        if len(prompts) == 2:
+            return {"think": "查询", "action": "click", "text": "搜索"}
+        return {"think": "结果条数已经出来", "done": True}
+
+    assert _think_and_act(run, state, case, {"checks": []}, Hand(), model, "test", "Microsoft Edge", "A-1,A-2") == 0
+    assert "页面结果：共 9 条" in prompts[-1]
+    assert "这是查询后的条数" not in prompts[1]
+    events = json.loads((run / "state.json").read_text(encoding="utf-8"))["events"]
+    assert any("正在等结果条数变化" in item["basis"] for item in events)
+    saved = json.loads((run / "cases" / "C1" / "case.json").read_text(encoding="utf-8"))
+    assert saved["observation"] == "final"
+    assert saved["status"] == "running"
+
+
+def test_unchanged_query_count_does_not_finish_the_case(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    case = {
+        "id": "C1",
+        "title": "按条件查询",
+        "check_id": "K1",
+        "status": "running",
+        "expect_text": ["结果条数"],
+        "steps": [
+            {"phase": "test", "action": "type", "role": "textbox", "name": "条件"},
+            {"phase": "test", "action": "click", "role": "button", "name": "搜索"},
+        ],
+    }
+    prompts = []
+
+    class Hand:
+        native = object()
+        count_wait = 0.15
+
+        def query(self, app, text, role=""):
+            if text == "共":
+                matches = [{"element_index": 2, "role": "AXStaticText", "text": "共 0 条"}]
+            elif text == "条件":
+                matches = [{"element_index": 4, "role": "AXTextField", "text": "条件"}]
+            elif text == "搜索":
+                matches = [{"element_index": 5, "role": "AXButton", "text": "搜索"}]
+            else:
+                matches = [{"element_index": 3, "role": "AXTextField", "text": text}]
+            return {"content": [{"type": "text", "text": json.dumps({"matches": matches})}]}
+
+        def get_app_state(self, app, include_screenshot=False):
+            return {"content": [{"type": "text", "text": "页面"}]}
+
+        def click(self, app, index):
+            return {}
+
+        def set_value(self, app, index, value):
+            return {}
+
+    def model(prompt):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return {"think": "填入准备的值", "action": "type", "text": "条件", "value": "A-1,A-2"}
+        if len(prompts) == 2:
+            return {"think": "查询", "action": "click", "text": "搜索"}
+        if len(prompts) == 3:
+            assert "点查询之前" in prompt
+            assert "这是查询后的条数" not in prompt
+            return {"think": "先结束", "done": True}
+        assert "等它变掉再结束" in prompt
+        return {"think": "先停", "action": "skip", "text": "先停"}
+
+    assert _think_and_act(run, state, case, {"checks": []}, Hand(), model, "test", "Microsoft Edge", "A-1,A-2") == 0
+    saved = json.loads((run / "cases" / "C1" / "case.json").read_text(encoding="utf-8"))
+    assert saved["observation"] != "final"
+    events = json.loads((run / "state.json").read_text(encoding="utf-8"))["events"]
+    assert any("等它变掉再结束" in item["basis"] for item in events)
+
+
+def test_unqueried_baseline_is_not_filled(tmp_path):
+    from qa_platform.runner.execute import _think_and_act
+    from qa_platform.runner.report import UNQUERIED
+
+    run = build(tmp_path)
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    case = {
+        "id": "C1",
+        "title": "查视频号",
+        "check_id": "K1",
+        "status": "running",
+        "expect_text": ["结果条数"],
+        "steps": [
+            {"phase": "test", "action": "type", "role": "textbox", "name": "流水ID"},
+            {"phase": "test", "action": "click", "role": "button", "name": "搜索"},
+        ],
+    }
+    typed = []
+
+    class Hand:
+        def query(self, app, text, role=""):
+            kind = "AXTextField" if "ID" in text or text == "流水ID" else "AXButton"
+            body = json.dumps({"matches": [{"element_index": 4, "role": kind, "text": text}]})
+            return {"content": [{"type": "text", "text": body}]}
+
+        def get_app_state(self, app, include_screenshot=False):
+            return {"content": [{"type": "text", "text": "页面"}]}
+
+        def click(self, app, index):
+            raise AssertionError("clicked")
+
+        def set_value(self, app, index, value):
+            typed.append(value)
+
+    def model(_prompt):
+        raise AssertionError("model")
+
+    assert _think_and_act(
+        run, state, case, {"checks": []}, Hand(), model,
+        "test", "Microsoft Edge", "", unqueried=True,
+    ) == 0
+    assert typed == []
+    saved = json.loads((run / "cases" / "C1" / "case.json").read_text(encoding="utf-8"))
+    assert saved["status"] == "skipped"
+    assert saved["result_reason"] == UNQUERIED
+
+
 def test_count_is_read_only_when_the_case_expects_it(tmp_path):
     from qa_platform.runner.execute import _think_and_act
 

@@ -79,7 +79,7 @@
           "source": {
             "type": "string",
             "pattern": "^.+:[0-9]+$",
-            "description": "path:line，路径必须出现在本次材料里。"
+            "description": "path:line，不能包含提交哈希。路径必须出现在本次材料或页签索引中；对上页签时使用索引行给出的 source。"
           },
           "database": {
             "type": "string",
