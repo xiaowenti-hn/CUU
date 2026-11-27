@@ -8,6 +8,7 @@ import uuid
 import urllib.error
 import urllib.request
 
+from qa_platform.runner.data_plan import case_omits_check, has_data_plan, validate_data_plan
 from qa_platform.runner.preflight import note, record
 from qa_platform.store import read_state, review_digest, timestamp, write_json
 
@@ -17,7 +18,7 @@ ACTIONS = {"click", "type", "select", "set"}
 CLICK_FIELDS = {"value", "option", "checked"}
 SOURCE_LINE = re.compile(r"^(.+):([0-9]+)$")
 
-SYSTEM_PROMPT = """你是验收方案助手。读需求正文、截图、材料和 pages，只返回一个 JSON。顶层是 ui、cases、checks、open、source。
+SYSTEM_PROMPT = """你是验收方案助手。读需求正文、截图、材料和 pages，只返回一个 JSON。顶层是 ui、data_plan、cases、checks、open、source。
 
 截图只说明界面长什么样。最外层页面写入 ui.pages[0].title_text，图上的页签按顺序写入 ui.surfaces，用来认出是哪一页。忽略浏览器书签和标签栏。
 测哪些页签以 pages 为准。和截图页签落在同一条 route 上的行，每一行写一条用例，check 用这一行的 source 和 table。图上没有、但在这条 route 上的页签也要写。
@@ -29,8 +30,16 @@ checks 只为事后查表。table 必须使用 live_tables 中的真实表名。
 
 正确格式示例："state_field":"status","source":"bfrs-app/src/main/java/com/greatonce/bfrs/controller/AlipayBillController.java:42"。示例行号仅说明格式，必须使用 pages 或源码中实际给出的行号。不要把类似 "ae5accb5 <path>" 的提交号前缀写进 checks.source。
 
-照这个形状填，没有的数组写 []：
-{"ui":{"seed_object_count":0,"pages":[{"title_text":"","path":""}],"surfaces":[]},"cases":[{"id":"","title":"","goal":"","start":"","expect_text":[],"check_id":"","pk_columns":[],"steps":[{"phase":"test","action":"type","role":"textbox","name":"","locator_status":"ready","value":""}]}],"checks":[{"id":"","kind":"table","table":"","pk":[],"state_field":"","source":""}],"open":[],"source":{"commits":[],"files":[]}}
+写用例前先写 data_plan。acceptances 是验收点，items 是数据计划，用例用 acceptance_id 和 data_plan_id 连上。一条验收可以有多条用例。data_plan 不减少用例。
+pages 里和截图落在同一条 route 上的每一行，仍然各写一条用例，start 写成「外层页面 - 页签」。这一行有 table 时 evidence 写 table，checks 照抄该行的 source 和 table，用例保留 check_id 和 pk_columns，大小写与 check.pk 一致。这些页签不要写进 open。
+evidence 只写这条真正的证据：page、api、task、message、file、table、external。只有这条验收不查表时，才省略 check_id 和 pk_columns。
+purpose 写 require（至少要有命中）或 expect_absent（确认没有命中）。prepare 先写 reuse。不能铺页面、不能改数；做不到就写 none，缺什么写进 blockers。有 blockers 的不要写可执行步骤。
+where.source 和 needs.source 写 requirement:需求原句 或 path:line。where.column 用该表 columns 里的列名，大小写照抄。条件只来自这份需求和代码。不要猜，不要把没跑的写成通过。
+open 里每一项都要有 decision，值必须是空字符串。
+
+照这个形状填，没有的数组写 []。有表的页签用这个形状：
+{"ui":{"seed_object_count":0,"pages":[{"title_text":"","path":""}],"surfaces":[]},"data_plan":{"acceptances":[{"id":"A1","expect":""}],"items":[{"id":"D1","acceptance_id":"A1","evidence":"table","purpose":"require","prepare":"reuse","table":"","check_id":"K1","where":[{"column":"","op":"eq","value":"","source":"requirement:需求原句"}],"needs":[],"blockers":[]}]},"cases":[{"id":"","acceptance_id":"A1","data_plan_id":"D1","title":"","goal":"","start":"","expect_text":["结果条数"],"check_id":"K1","pk_columns":[],"steps":[{"phase":"test","action":"type","role":"textbox","name":"","locator_status":"ready","value":"使用库里已有数据"}]}],"checks":[{"id":"K1","kind":"table","table":"","pk":[],"state_field":"","source":""}],"open":[],"source":{"commits":[],"files":[]}}
+不查表的验收才把 evidence 写成 page，并且不要写 check_id、pk_columns。
 """
 
 
@@ -175,10 +184,73 @@ def _matched_tab(start: str, candidates: list[str]) -> str:
     return found[0]
 
 
-def _fill_plan_defaults(doc) -> None:
-    """主键没写时用检查的主键。步骤有名字却没写状态时视为 ready。"""
+def _align_name(name: str, known) -> str:
+    """只在大小写不同时，改成已知列名的写法。"""
+    if not isinstance(name, str) or not known:
+        return name
+    if name in known:
+        return name
+    folded = {}
+    for item in known:
+        if isinstance(item, str) and item:
+            folded.setdefault(item.casefold(), item)
+    return folded.get(name.casefold(), name)
+
+
+def _align_column_case(doc, table_columns) -> None:
+    """列名以库里的写法为准，用例主键再跟检查的主键对齐。"""
     if not isinstance(doc, dict):
         return
+    known = {}
+    if isinstance(table_columns, dict):
+        for table, columns in table_columns.items():
+            if isinstance(table, str) and isinstance(columns, (list, tuple, set)):
+                known[table] = [item for item in columns if isinstance(item, str) and item]
+    pk_by_id: dict[str, list[str]] = {}
+    checks = doc.get("checks") if isinstance(doc.get("checks"), list) else []
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        live = known.get(check.get("table")) or []
+        pk = check.get("pk")
+        if isinstance(pk, list) and live:
+            check["pk"] = [_align_name(item, live) if isinstance(item, str) else item for item in pk]
+        state_field = check.get("state_field")
+        if isinstance(state_field, str) and live:
+            check["state_field"] = _align_name(state_field, live)
+        aligned = check.get("pk")
+        check_id = check.get("id")
+        if isinstance(check_id, str) and isinstance(aligned, list):
+            pk_by_id[check_id] = [item for item in aligned if isinstance(item, str)]
+    cases = doc.get("cases") if isinstance(doc.get("cases"), list) else []
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        pk = pk_by_id.get(case.get("check_id")) or []
+        columns = case.get("pk_columns")
+        if isinstance(columns, list) and pk:
+            case["pk_columns"] = [_align_name(item, pk) if isinstance(item, str) else item for item in columns]
+    plan = doc.get("data_plan") if isinstance(doc.get("data_plan"), dict) else {}
+    for item in plan.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        live = known.get(item.get("table")) or []
+        if not live:
+            continue
+        for clause in item.get("where") or []:
+            if isinstance(clause, dict) and isinstance(clause.get("column"), str):
+                clause["column"] = _align_name(clause["column"], live)
+
+
+def _fill_plan_defaults(doc) -> None:
+    """主键没写时用检查的主键。步骤有名字却没写状态时视为 ready。open 没写决定时留空。"""
+    if not isinstance(doc, dict):
+        return
+    opens = doc.get("open")
+    if isinstance(opens, list):
+        for item in opens:
+            if isinstance(item, dict) and item.get("decision") is None:
+                item["decision"] = ""
     checks = doc.get("checks") if isinstance(doc.get("checks"), list) else []
     pk_by_id: dict[str, list[str]] = {}
     for check in checks:
@@ -463,6 +535,7 @@ def validate_plan(doc, *, allowed_commits=None, material_files=None,
     if not isinstance(doc, dict):
         return ["方案必须是 JSON 对象"]
     _fill_plan_defaults(doc)
+    _align_column_case(doc, table_columns)
     index_paths = _index_paths(page_index)
     for key in ("ui", "cases", "checks", "open", "source"):
         if key not in doc:
@@ -479,9 +552,14 @@ def validate_plan(doc, *, allowed_commits=None, material_files=None,
             errors.append("ui.seed_object_count 必须是大于等于 0 的整数")
     cases = doc.get("cases")
     checks = doc.get("checks")
-    if not isinstance(checks, list) or not checks:
-        errors.append("checks 至少一条")
+    uses_plan = has_data_plan(doc)
+    if "data_plan" in doc and not uses_plan:
+        errors.append("data_plan 必须是对象")
+    if not isinstance(checks, list):
+        errors.append("checks 必须是数组" if uses_plan else "checks 至少一条")
         checks = []
+    elif not checks and not uses_plan:
+        errors.append("checks 至少一条")
     if not isinstance(cases, list) or not cases:
         errors.append("cases 至少一条")
         cases = []
@@ -584,19 +662,23 @@ def validate_plan(doc, *, allowed_commits=None, material_files=None,
                     f"用例「{case_label}」的目标把结果写成了只剩输入或条数相等。"
                     "查询结果是页面上的条数，可以和输入条数不同。"
                 )
-        check = check_by_id.get(case.get("check_id"))
-        if check is None:
-            errors.append("case.check_id 必须指向某个 check")
-            pk = []
+        if uses_plan and case_omits_check(doc, case):
+            if case.get("check_id") or case.get("pk_columns"):
+                errors.append(f"用例「{case_label}」不查表，不要写 check_id 或 pk_columns")
         else:
-            pk = check.get("pk") if isinstance(check.get("pk"), list) else []
-        columns = case.get("pk_columns")
-        if (not isinstance(columns, list) or not columns
-                or any(not isinstance(item, str) or item not in pk for item in columns)):
-            errors.append(
-                f"用例「{case_label}」的 pk_columns 必须是对应 check 的 pk 的非空子集。"
-                f"主键是 {pk or '空'}，现在写的是 {columns!r}"
-            )
+            check = check_by_id.get(case.get("check_id"))
+            if check is None:
+                errors.append("case.check_id 必须指向某个 check")
+                pk = []
+            else:
+                pk = check.get("pk") if isinstance(check.get("pk"), list) else []
+            columns = case.get("pk_columns")
+            if (not isinstance(columns, list) or not columns
+                    or any(not isinstance(item, str) or item not in pk for item in columns)):
+                errors.append(
+                    f"用例「{case_label}」的 pk_columns 必须是对应 check 的 pk 的非空子集。"
+                    f"主键是 {pk or '空'}，现在写的是 {columns!r}"
+                )
         steps = case.get("steps")
         if not isinstance(steps, list):
             errors.append("case.steps 必须是数组")
@@ -647,6 +729,15 @@ def validate_plan(doc, *, allowed_commits=None, material_files=None,
     errors.extend(_binding_errors(
         doc, ui if isinstance(ui, dict) else {}, cases, check_by_id, page_index,
     ))
+    if uses_plan:
+        errors.extend(validate_data_plan(
+            doc,
+            material_files=material_files,
+            allowed_databases=allowed_databases,
+            requirement=requirement,
+            table_columns=table_columns,
+            index_paths=index_paths,
+        ))
     return errors
 
 

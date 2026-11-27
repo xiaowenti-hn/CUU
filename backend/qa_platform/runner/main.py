@@ -67,6 +67,31 @@ def _run_locked(run_dir: Path, args) -> int:
             )
         return 4
     if plan_is_approved(run_dir, state):
+        from qa_platform.runner.baseline import _load_plan
+        from qa_platform.runner.data_plan import ensure_assessed, has_data_plan
+
+        plan = _load_plan(run_dir) or {}
+        if has_data_plan(plan):
+            code = ensure_assessed(run_dir)
+            if code != 0:
+                return code
+            note(run_dir, step="执行", basis="正在执行已经备好数据的用例")
+            deepseek, _yunxiao = read_secrets()
+            from qa_platform.runner.execute import deepseek_model, execute_data_plan
+            from qa_platform.runner.ocu import ProductSession
+            product = ProductSession()
+            try:
+                code = execute_data_plan(
+                    run_dir,
+                    session=product,
+                    model=deepseek_model(deepseek),
+                    query=lambda database, sql, allowed: read_only_query(
+                        database, sql, allowed=allowed, run_dir=run_dir,
+                    ),
+                )
+            finally:
+                product.close()
+            return finish_observed(run_dir, code)
         from qa_platform.runner.db import _load_baseline
         current = _load_baseline(run_dir) or {}
         if current.get("strategy") == "sql":

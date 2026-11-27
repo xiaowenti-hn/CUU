@@ -484,6 +484,17 @@ def test_validate_plan_rejects_demo_decision_and_extra_sha(tmp_path):
     decision_errors = validate_plan(decided, allowed_commits={sha}, material_files={path})
     assert any("decision" in item for item in decision_errors)
 
+    omitted = valid_doc(sha, path)
+    omitted["open"] = [{"id": "O1", "topic": "文案"}]
+    assert validate_plan(omitted, allowed_commits={sha}, material_files={path}) == []
+    assert omitted["open"][0]["decision"] == ""
+
+    cased = valid_doc(sha, path)
+    cased["checks"][0]["pk"] = ["jd_daily_Bill_id"]
+    cased["cases"][0]["pk_columns"] = ["jd_daily_bill_id"]
+    assert validate_plan(cased, allowed_commits={sha}, material_files={path}) == []
+    assert cased["cases"][0]["pk_columns"] == ["jd_daily_Bill_id"]
+
     extra = valid_doc(sha, path)
     extra["source"]["commits"] = [sha, "b" * 40]
     extra_errors = validate_plan(extra, allowed_commits={sha}, material_files={path})

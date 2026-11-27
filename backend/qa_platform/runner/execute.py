@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
+from qa_platform.runner.data_plan import case_value_flags
 from qa_platform.runner.db import QueryError, read_only_query
 from qa_platform.runner.menu_page import fetch_menus, load_menus, pick_path
 from qa_platform.runner.ocu import APP, CACHE, OcuError, assert_product_js, browser_argv, ensure_browser
@@ -493,6 +494,8 @@ def _prepare_cases(run_dir: Path, plan: dict, phase: str = "test") -> list[dict]
             "start": start,
             "expect_text": expect,
             "check_id": item.get("check_id"),
+            "acceptance_id": item.get("acceptance_id") or "",
+            "data_plan_id": item.get("data_plan_id") or "",
             "status": status,
             "pending": existing.get("pending"),
             "steps": steps,
@@ -545,6 +548,38 @@ def execute_reuse(run_dir: Path, *, session=None, model=None, query=None, browse
         )
         if outcome != 0:
             return outcome
+    record(run_dir, exit_code=0, event_status="完成", basis="观察已记下，尚未封口", step="执行")
+    return 0
+
+
+def execute_data_plan(run_dir: Path, *, session=None, model=None, query=None, browser=None) -> int:
+    """新方案里已经核对过的用例。不要求再确认一次基线。缺数据的用例保持阻塞。"""
+    state = read_state(run_dir)
+    plan = _load_json(run_dir / "plan.json") or {}
+    base_url = str(state.get("base_url") or "")
+    app_name, browser_error = show_test_page(run_dir, plan, state, session, query, browser, base_url)
+    if not app_name:
+        record(run_dir, exit_code=2, event_status="阻塞", basis=browser_error, step="执行")
+        return 2
+    if session is None or model is None:
+        record(run_dir, exit_code=2, event_status="阻塞", basis="没有执行会话", step="执行")
+        return 2
+    cases = _prepare_cases(run_dir, plan)
+    ran = False
+    for index, case in enumerate(cases):
+        if case.get("status") in {"blocked", "failed", "paused", "skipped"} and not case.get("pending"):
+            continue
+        if not case.get("steps"):
+            continue
+        ran = True
+        outcome = _run_case(
+            run_dir, state, case, cases[index + 1:], plan, base_url, session, model, query, "test", app_name,
+        )
+        if outcome != 0:
+            return outcome
+    if not ran:
+        record(run_dir, exit_code=2, event_status="阻塞", basis="没有可以执行的用例", step="执行")
+        return 2
     record(run_dir, exit_code=0, event_status="完成", basis="观察已记下，尚未封口", step="执行")
     return 0
 
@@ -2462,12 +2497,9 @@ def _run_case(run_dir, state, case, later, plan, base_url, session, model, query
         if isinstance(step, dict) and step.get("phase", "test") == phase
     ]
     if plan_steps and model is not None and hasattr(session, "query") and hasattr(session, "click") and hasattr(session, "set_value"):
-        saved = (_load_json(run_dir / "baseline.json") or {}).get("test_values") or {}
-        check_id = case.get("check_id")
-        real = saved.get(check_id) if isinstance(saved, dict) else None
-        empty_data = isinstance(real, list) and not real
-        unqueried = isinstance(saved, dict) and bool(saved) and bool(check_id) and check_id not in saved
-        typed = ",".join(str(item) for item in real) if isinstance(real, list) and real else ""
+        baseline = _load_json(run_dir / "baseline.json") or {}
+        real, empty_data, unqueried = case_value_flags(baseline, case)
+        typed = ",".join(str(item) for item in real) if real else ""
         return _think_and_act(
             run_dir, state, case, plan, session, model, phase, app, typed,
             empty_data=empty_data, unqueried=unqueried,
@@ -2486,9 +2518,9 @@ def _run_case(run_dir, state, case, later, plan, base_url, session, model, query
             record(run_dir, exit_code=3, event_status="暂停", basis="页面和库没有变化", step="执行")
             return 3
     for _ in range(8):
-        saved = (_load_json(run_dir / "baseline.json") or {}).get("test_values") or {}
-        real = saved.get(case.get("check_id")) if isinstance(saved, dict) else None
-        typed = ",".join(str(item) for item in real) if isinstance(real, list) and real else ""
+        baseline = _load_json(run_dir / "baseline.json") or {}
+        real, _empty_data, _unqueried = case_value_flags(baseline, case)
+        typed = ",".join(str(item) for item in real) if real else ""
         try:
             decision = model(_case_prompt(case, plan, base_url, phase, typed, app, str(case.get("seen") or "")))
         except (OSError, ValueError, TypeError):
